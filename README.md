@@ -36,12 +36,30 @@ mkdir -p omnidrop && cd omnidrop
 # 写入 docker-compose.yml（见下方示例）与 .env（见下方示例）
 ```
 
-生成密钥：
+### 生成两个密钥（必做，不要手写弱口令）
+
+需要 **Node.js** 时（推荐，一条命令直接带变量名）：
 
 ```bash
+# 1) 数据加密密钥 → 填到 OMNIDROP_DATA_KEY（32 字节，base64）
 node -e "console.log('OMNIDROP_DATA_KEY=' + require('crypto').randomBytes(32).toString('base64'))"
+
+# 2) 会话签名密钥 → 填到 SESSION_SECRET（随机 hex）
 node -e "console.log('SESSION_SECRET=' + require('crypto').randomBytes(32).toString('hex'))"
 ```
+
+没有 Node、有 **OpenSSL** 时：
+
+```bash
+# OMNIDROP_DATA_KEY（base64，32 字节）
+echo "OMNIDROP_DATA_KEY=$(openssl rand -base64 32)"
+
+# SESSION_SECRET（hex）
+echo "SESSION_SECRET=$(openssl rand -hex 32)"
+```
+
+把两条命令的**完整输出**粘进 `.env`。  
+**请备份 `OMNIDROP_DATA_KEY`**：丢失后数据库里已加密的目标凭据将无法解密。
 
 ### 2. 启动
 
@@ -49,6 +67,7 @@ node -e "console.log('SESSION_SECRET=' + require('crypto').randomBytes(32).toStr
 docker compose pull
 docker compose up -d
 # 打开 http://服务器IP:8080  首次创建管理员
+# 若用 Cloudflare 隧道：APP_BASE_URL=https://你的域名 且 COOKIE_SECURE=true
 ```
 
 若 GHCR 包为 private，先登录：
@@ -128,24 +147,26 @@ services:
 
 ## .env 示例
 
-同目录创建 `.env`（可复制仓库 [.env.example](.env.example)）：
+同目录创建 `.env`（可复制仓库 [.env.example](.env.example)）。  
+**密钥不要手写**：用上一节命令生成后粘贴。
 
 ```env
-# 必填：32 字节 AES 密钥（base64）
-# node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+# ---------- 必填密钥（用下面命令生成，勿用 123456 等弱值）----------
+# node -e "console.log('OMNIDROP_DATA_KEY=' + require('crypto').randomBytes(32).toString('base64'))"
 OMNIDROP_DATA_KEY=
 
-# 必填：会话签名密钥
-# node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# node -e "console.log('SESSION_SECRET=' + require('crypto').randomBytes(32).toString('hex'))"
 SESSION_SECRET=
 
-# 面板对外访问地址（CORS、分享链接会用到）
+# 面板对外访问地址（CORS、分享链接）
+# 本机直连示例：http://localhost:8080
+# Cloudflare 隧道示例：https://drop.example.com
 APP_BASE_URL=http://localhost:8080
 
 # 宿主机映射端口（对应 compose 的 8080:80）
 WEB_PORT=8080
 
-# 使用 HTTPS 时改为 true
+# 使用 HTTPS / CF 隧道时改为 true
 COOKIE_SECURE=false
 
 LOG_LEVEL=info
@@ -163,12 +184,21 @@ OMNIDROP_IMAGE=ghcr.io/debbide/omnidrop:latest
 
 | 变量 | 说明 |
 |------|------|
-| `OMNIDROP_DATA_KEY` | 加密目标凭据，**丢失则旧目标密钥无法解密** |
-| `SESSION_SECRET` | Cookie / 会话签名 |
-| `APP_BASE_URL` | 浏览器访问本站的完整 URL |
+| `OMNIDROP_DATA_KEY` | 加密目标凭据；须为 32 字节的 base64；**丢失则旧凭据无法解密** |
+| `SESSION_SECRET` | Cookie / 会话签名；随机长串即可 |
+| `APP_BASE_URL` | 浏览器访问本站的完整 URL（CF 隧道填 `https://域名`） |
 | `WEB_PORT` | 宿主机端口，默认 `8080` |
 | `COOKIE_SECURE` | HTTPS 时设 `true` |
 | `GITHUB_TOKEN` | 可选，提高 GitHub Release 解析限额 |
+
+生成命令速查：
+
+```bash
+node -e "console.log('OMNIDROP_DATA_KEY=' + require('crypto').randomBytes(32).toString('base64'))"
+node -e "console.log('SESSION_SECRET=' + require('crypto').randomBytes(32).toString('hex'))"
+# 或：echo "OMNIDROP_DATA_KEY=$(openssl rand -base64 32)"
+# 或：echo "SESSION_SECRET=$(openssl rand -hex 32)"
+```
 
 ---
 
