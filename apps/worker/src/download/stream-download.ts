@@ -171,23 +171,15 @@ export async function streamDownloadToFile(opts: {
   const metaPath = `${filePath}.part.json`;
   const resumeEnabled = opts.resume !== false;
 
-  let existing = 0;
-  if (resumeEnabled) {
-    try {
-      const st = await fs.stat(partPath);
-      existing = st.size;
-    } catch {
-      existing = 0;
-    }
-  } else {
+  const clearPart = async () => {
     await fs.unlink(partPath).catch(() => undefined);
     await fs.unlink(metaPath).catch(() => undefined);
-  }
+  };
 
   // If final file already complete (edge case), return it
   try {
     const finalSt = await fs.stat(filePath);
-    if (finalSt.size > 0 && existing === 0) {
+    if (finalSt.size > 0) {
       const checksumSha256 = await sha256File(filePath);
       if (
         !opts.expectedSha256 ||
@@ -206,28 +198,113 @@ export async function streamDownloadToFile(opts: {
     /* no final yet */
   }
 
-  const baseHeaders: Record<string, string> = {
-    "User-Agent": "OmniDrop",
-    ...(opts.headers ?? {}),
+  // Attempt 1: resume from .part if present. On 416 / bad range, wipe and full re-download.
+  let forceFull = !resumeEnabled;
+  let lastErr: unknown;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await runDownloadAttempt({
+        opts,
+        fileName,
+        filePath,
+        partPath,
+        metaPath,
+        forceFull,
+        clearPart,
+      });
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const retriable =
+        /\b416\b/.test(msg) ||
+        /Range Not Satisfiable/i.test(msg) ||
+        /Range mismatch/i.test(msg) ||
+        /Download incomplete/i.test(msg);
+      if (attempt === 0 && retriable) {
+        logger.warn(
+          { jobId: opts.jobId, err: msg },
+          "Download resume failed; clearing partial and retrying full",
+        );
+        await clearPart();
+        forceFull = true;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+async function runDownloadAttempt(args: {
+  opts: {
+    jobId: string;
+    url: string;
+    expectedSha256?: string | null;
+    headers?: Record<string, string>;
+    onProgress?: (p: DownloadProgress) => void | Promise<void>;
   };
+  fileName: string;
+  filePath: string;
+  partPath: string;
+  metaPath: string;
+  forceFull: boolean;
+  clearPart: () => Promise<void>;
+}): Promise<DownloadResult> {
+  const { opts, fileName, filePath, partPath, metaPath, forceFull, clearPart } =
+    args;
 
-  let resumed = false;
-  let bytesDone = existing;
-  let bytesTotal: number | null = null;
+  let existing = 0;
+  if (!forceFull) {
+    try {
+      const st = await fs.stat(partPath);
+      existing = st.size;
+    } catch {
+      existing = 0;
+    }
+  } else {
+    await clearPart();
+  }
 
+  // Stale part larger than previously known total → restart full
   if (existing > 0) {
     const meta = await readPartMeta(metaPath);
     if (meta && meta.url !== opts.url) {
       logger.info({ jobId: opts.jobId }, "Part meta URL mismatch, restart download");
-      await fs.unlink(partPath).catch(() => undefined);
-      await fs.unlink(metaPath).catch(() => undefined);
+      await clearPart();
       existing = 0;
-      bytesDone = 0;
-    } else {
-      baseHeaders.Range = `bytes=${existing}-`;
-      resumed = true;
-      if (meta?.expectedTotal) bytesTotal = meta.expectedTotal;
+    } else if (
+      meta?.expectedTotal != null &&
+      meta.expectedTotal > 0 &&
+      existing > meta.expectedTotal
+    ) {
+      logger.info(
+        { jobId: opts.jobId, existing, expectedTotal: meta.expectedTotal },
+        "Part larger than expected total; restart full download",
+      );
+      await clearPart();
+      existing = 0;
     }
+  }
+
+  const baseHeaders: Record<string, string> = {
+    "User-Agent": "OmniDrop",
+    ...(opts.headers ?? {}),
+  };
+  // Never send Range on force-full (prevents GitHub 416 loops)
+  delete baseHeaders.Range;
+  delete baseHeaders.range;
+
+  let resumed = false;
+  let bytesDone = existing;
+  let bytesTotal: number | null = null;
+  let headerClaimedTotal: number | null = null;
+
+  if (existing > 0) {
+    const meta = await readPartMeta(metaPath);
+    baseHeaders.Range = `bytes=${existing}-`;
+    resumed = true;
+    if (meta?.expectedTotal) bytesTotal = meta.expectedTotal;
   }
 
   let response;
@@ -237,20 +314,31 @@ export async function streamDownloadToFile(opts: {
       timeout: 0,
       maxRedirects: 5,
       headers: baseHeaders,
-      // Do not treat 3xx as success without body; axios follows redirects itself.
+      // 416 must not be "success" — handled in catch for auto-restart
       validateStatus: (s) => s === 200 || s === 206,
     });
   } catch (err) {
-    // keep .part for next retry; surface GitHub-ish 404/401 clearly
     if (axios.isAxiosError(err) && err.response) {
       const status = err.response.status;
+      // Drain body so socket can reuse
+      try {
+        err.response.data?.destroy?.();
+      } catch {
+        /* */
+      }
       const isGithub =
         typeof opts.url === "string" &&
-        (opts.url.includes("github.com") || opts.url.includes("githubusercontent.com"));
+        (opts.url.includes("github.com") ||
+          opts.url.includes("githubusercontent.com"));
+      if (status === 416) {
+        throw new Error(
+          `下载失败 HTTP 416（Range 不可用，将尝试整文件重下）: ${opts.url}`,
+        );
+      }
       if (isGithub && status === 404) {
         throw new Error(
           "下载资源 404：私有库请确认已配置有权限的 GitHub Token；" +
-            "或该 Asset 不存在。请删除任务后用「解析 Release」重新选择资源再下。",
+            "或该文件不存在。",
         );
       }
       if (isGithub && (status === 401 || status === 403)) {
@@ -263,21 +351,19 @@ export async function streamDownloadToFile(opts: {
     throw err;
   }
 
-  // Follow is handled by axios; if server ignores Range and returns 200 with full body
+  // Server ignored Range → full body; discard partial
   if (response.status === 200 && existing > 0) {
     logger.warn(
       { jobId: opts.jobId, existing },
       "Server ignored Range (200); restarting full download",
     );
-    await fs.unlink(partPath).catch(() => undefined);
-    await fs.unlink(metaPath).catch(() => undefined);
+    await clearPart();
     existing = 0;
     bytesDone = 0;
     resumed = false;
   }
 
   if (response.status !== 200 && response.status !== 206) {
-    // destroy stream body
     response.data?.destroy?.();
     throw new Error(`Download failed with HTTP ${response.status}`);
   }
@@ -285,31 +371,35 @@ export async function streamDownloadToFile(opts: {
   if (response.status === 206) {
     resumed = true;
     const cr = String(response.headers["content-range"] ?? "");
-    // bytes start-end/total
     const m = cr.match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
-    if (m && m[3] !== "*") {
-      bytesTotal = Number(m[3]);
-    } else {
-      const cl = response.headers["content-length"]
-        ? Number(response.headers["content-length"])
-        : null;
-      if (cl != null) bytesTotal = existing + cl;
-    }
-    // If server started at wrong offset, restart
     if (m && Number(m[1]) !== existing) {
       response.data?.destroy?.();
       throw new Error(
         `Range mismatch: requested ${existing}, server started at ${m[1]}`,
       );
     }
+    if (m && m[3] !== "*") {
+      bytesTotal = Number(m[3]);
+      headerClaimedTotal = bytesTotal;
+    } else {
+      const cl = response.headers["content-length"]
+        ? Number(response.headers["content-length"])
+        : null;
+      if (cl != null && Number.isFinite(cl)) {
+        bytesTotal = existing + cl;
+        headerClaimedTotal = bytesTotal;
+      }
+    }
   } else {
-    // 200 full
+    // 200 full — Content-Length is only a hint (CDNs/GitHub may lie or omit)
     const cl = response.headers["content-length"]
       ? Number(response.headers["content-length"])
       : null;
-    bytesTotal = cl;
+    bytesTotal = cl != null && Number.isFinite(cl) && cl > 0 ? cl : null;
+    headerClaimedTotal = bytesTotal;
     existing = 0;
     bytesDone = 0;
+    resumed = false;
   }
 
   const etag = (response.headers.etag as string | undefined) ?? null;
@@ -349,7 +439,6 @@ export async function streamDownloadToFile(opts: {
           }
           bytesDone += chunk.length;
           const now = Date.now();
-          // Emit immediately on first chunk, then every ~250ms
           if (opts.onProgress && (firstChunk || now - lastEmit > 250)) {
             firstChunk = false;
             lastEmit = now;
@@ -371,28 +460,35 @@ export async function streamDownloadToFile(opts: {
   try {
     await pipeline(response.data, transform, writeStream);
   } catch (err) {
-    // Keep .part for resume unless canceled
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.toLowerCase().includes("canceled")) {
-      // user cancel: leave part so manual retry can resume, or clean?
-      // keep part for resume on retry
-    }
     throw err;
   }
 
-  // Verify size if known
   const st = await fs.stat(partPath);
-  if (bytesTotal != null && st.size !== bytesTotal) {
-    // incomplete — keep part for resume
+
+  // Size check: only fail if we got FEWER bytes than a trusted total.
+  // If we got MORE than Content-Length (GitHub raw/CDN quirks), accept actual size.
+  if (headerClaimedTotal != null && st.size < headerClaimedTotal) {
     throw new Error(
-      `Download incomplete: got ${st.size} bytes, expected ${bytesTotal}`,
+      `Download incomplete: got ${st.size} bytes, expected ${headerClaimedTotal}`,
+    );
+  }
+  if (headerClaimedTotal != null && st.size > headerClaimedTotal) {
+    logger.warn(
+      {
+        jobId: opts.jobId,
+        got: st.size,
+        contentLength: headerClaimedTotal,
+      },
+      "Downloaded more than Content-Length; accepting actual size",
     );
   }
 
+  const finalTotal = st.size;
+
   if (opts.onProgress) {
     await opts.onProgress({
-      bytesDone: st.size,
-      bytesTotal: bytesTotal ?? st.size,
+      bytesDone: finalTotal,
+      bytesTotal: finalTotal,
       resumedFrom: resumed ? existing : 0,
       phase: "hashing",
     });
@@ -403,22 +499,20 @@ export async function streamDownloadToFile(opts: {
     opts.expectedSha256 &&
     opts.expectedSha256.toLowerCase() !== checksumSha256.toLowerCase()
   ) {
-    await fs.unlink(partPath).catch(() => undefined);
-    await fs.unlink(metaPath).catch(() => undefined);
+    await clearPart();
     throw new Error(
       `Checksum mismatch: expected ${opts.expectedSha256}, got ${checksumSha256}`,
     );
   }
 
-  // Atomic-ish promote part → final
   await fs.unlink(filePath).catch(() => undefined);
   await fs.rename(partPath, filePath);
   await fs.unlink(metaPath).catch(() => undefined);
 
   if (opts.onProgress) {
     await opts.onProgress({
-      bytesDone: st.size,
-      bytesTotal: st.size,
+      bytesDone: finalTotal,
+      bytesTotal: finalTotal,
       resumedFrom: resumed ? existing : 0,
       phase: "downloading",
     });
@@ -428,7 +522,7 @@ export async function streamDownloadToFile(opts: {
     {
       jobId: opts.jobId,
       fileName,
-      size: st.size,
+      size: finalTotal,
       resumed,
       from: resumed ? existing : 0,
     },
@@ -438,7 +532,7 @@ export async function streamDownloadToFile(opts: {
   return {
     filePath,
     fileName,
-    bytesTotal: st.size,
+    bytesTotal: finalTotal,
     checksumSha256,
     resumed,
   };
