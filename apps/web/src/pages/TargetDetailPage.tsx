@@ -218,16 +218,15 @@ export function TargetDetailPage() {
             items={crumbs.map((c, i) => ({
               title:
                 i === crumbs.length - 1 ? (
-                  c.title
+                  <span>{c.title}</span>
                 ) : (
-                  <a
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setPath(c.path);
-                    }}
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => setPath(c.path)}
                   >
                     {c.title}
-                  </a>
+                  </button>
                 ),
             }))}
           />
@@ -332,14 +331,13 @@ export function TargetDetailPage() {
                 <Space>
                   {r.type === "dir" ? <FolderOpenOutlined /> : <FileOutlined />}
                   {r.type === "dir" ? (
-                    <a
-                      onClick={(e) => {
-                        e.preventDefault();
-                        setPath(r.path);
-                      }}
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => setPath(r.path)}
                     >
                       {name}
-                    </a>
+                    </button>
                   ) : (
                     name
                   )}

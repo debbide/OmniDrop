@@ -285,7 +285,19 @@ export function TargetsPage() {
           loading={isLoading}
           dataSource={data ?? []}
           columns={[
-            { title: "名称", dataIndex: "name" },
+            {
+              title: "名称",
+              dataIndex: "name",
+              render: (name, r) => (
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => nav(`/targets/${r.id}`)}
+                >
+                  {name}
+                </button>
+              ),
+            },
             {
               title: "类型",
               dataIndex: "type",

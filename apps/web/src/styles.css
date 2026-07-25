@@ -56,3 +56,17 @@ body,
   font-weight: 500;
   font-size: 12px;
 }
+
+/* In-app navigation that must NOT be a real <a href> (avoids blank new tabs) */
+button.linkish {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  color: #1677ff;
+  cursor: pointer;
+  font: inherit;
+}
+button.linkish:hover {
+  color: #4096ff;
+}
