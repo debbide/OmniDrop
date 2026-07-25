@@ -66,10 +66,15 @@ export function ArtifactsPage() {
       ).data,
   });
 
-  const { data: targets } = useQuery({
-    queryKey: ["targets"],
-    queryFn: async () =>
-      (await api.get<{ items: Target[] }>("/targets")).data.items,
+  const { data: targetsRaw } = useQuery({
+    queryKey: ["targets", "list"],
+    queryFn: async () => {
+      const body = (await api.get<{ items?: Target[] } | Target[]>("/targets"))
+        .data as { items?: Target[] } | Target[] | undefined;
+      if (Array.isArray(body)) return body;
+      if (body && Array.isArray(body.items)) return body.items;
+      return [] as Target[];
+    },
   });
 
   const delMut = useMutation({
@@ -117,7 +122,9 @@ export function ArtifactsPage() {
     onError: (e: Error) => message.error(e.message),
   });
 
-  const enabledTargets = (targets ?? []).filter((t) => t.enabled);
+  const enabledTargets = (Array.isArray(targetsRaw) ? targetsRaw : []).filter(
+    (t) => t.enabled,
+  );
 
   return (
     <div>

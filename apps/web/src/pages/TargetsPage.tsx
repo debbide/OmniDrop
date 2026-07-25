@@ -79,9 +79,14 @@ export function TargetsPage() {
   };
 
   const { data, isLoading } = useQuery({
-    queryKey: ["targets"],
-    queryFn: async () =>
-      (await api.get<{ items: Target[] }>("/targets")).data.items,
+    queryKey: ["targets", "list"],
+    queryFn: async () => {
+      const body = (await api.get<{ items?: Target[] } | Target[]>("/targets"))
+        .data as { items?: Target[] } | Target[] | undefined;
+      if (Array.isArray(body)) return body;
+      if (body && Array.isArray(body.items)) return body.items;
+      return [] as Target[];
+    },
   });
 
   const buildConfig = (values: Record<string, unknown>) => {
@@ -214,6 +219,7 @@ export function TargetsPage() {
       setEditing(null);
       form.resetFields();
       await qc.invalidateQueries({ queryKey: ["targets"] });
+      await qc.invalidateQueries({ queryKey: ["targets", "list"] });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -223,6 +229,7 @@ export function TargetsPage() {
     onSuccess: async () => {
       message.success("已删除");
       await qc.invalidateQueries({ queryKey: ["targets"] });
+      await qc.invalidateQueries({ queryKey: ["targets", "list"] });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -283,7 +290,7 @@ export function TargetsPage() {
         <Table
           rowKey="id"
           loading={isLoading}
-          dataSource={data ?? []}
+          dataSource={Array.isArray(data) ? data : []}
           columns={[
             {
               title: "名称",

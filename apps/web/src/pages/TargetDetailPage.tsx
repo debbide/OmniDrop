@@ -85,14 +85,26 @@ export function TargetDetailPage() {
     retry: 1,
   });
 
-  const { data: artifacts } = useQuery({
-    queryKey: ["artifacts"],
-    queryFn: async () =>
-      (await api.get<{ items: Array<{ id: string; fileName: string }> }>("/artifacts"))
-        .data.items,
+  // Never share queryKey ["artifacts"] with ArtifactsPage (that page caches
+  // { items, total, totalBytes }, not an array — causes ".map is not a function").
+  const { data: artifactsRaw } = useQuery({
+    queryKey: ["artifacts", "select-options"],
+    queryFn: async () => {
+      const res = await api.get<{
+        items?: Array<{ id: string; fileName: string }>;
+      }>("/artifacts");
+      const body = res.data as
+        | { items?: Array<{ id: string; fileName: string }> }
+        | Array<{ id: string; fileName: string }>
+        | undefined;
+      if (Array.isArray(body)) return body;
+      if (body && Array.isArray(body.items)) return body.items;
+      return [] as Array<{ id: string; fileName: string }>;
+    },
   });
+  const artifactOptions = Array.isArray(artifactsRaw) ? artifactsRaw : [];
 
-const currentPath = data?.path ?? path ?? data?.root ?? "/";
+  const currentPath = data?.path ?? path ?? data?.root ?? "/";
   const jailRoot =
     data?.root ??
     String(
@@ -123,6 +135,9 @@ const currentPath = data?.path ?? path ?? data?.root ?? "/";
       return [{ title: "/", path: "/" }];
     }
   }, [currentPath, jailRoot]);
+
+  const fileEntries = Array.isArray(data?.entries) ? data!.entries : [];
+  const breadcrumbItems = Array.isArray(crumbs) ? crumbs : [];
 
   const invalidate = async () => {
     setSelected([]);
@@ -231,9 +246,9 @@ const currentPath = data?.path ?? path ?? data?.root ?? "/";
       <div className="page-card">
         <Space wrap style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
           <Breadcrumb
-            items={crumbs.map((c, i) => ({
+            items={breadcrumbItems.map((c, i) => ({
               title:
-                i === crumbs.length - 1 ? (
+                i === breadcrumbItems.length - 1 ? (
                   <span>{c.title}</span>
                 ) : (
                   <button
@@ -329,7 +344,7 @@ const currentPath = data?.path ?? path ?? data?.root ?? "/";
         <Table
           rowKey="path"
           loading={isLoading}
-          dataSource={data?.entries ?? []}
+          dataSource={fileEntries}
           rowSelection={{
             selectedRowKeys: selected,
             onChange: (keys) => setSelected(keys as string[]),
@@ -481,7 +496,7 @@ const currentPath = data?.path ?? path ?? data?.root ?? "/";
             <Select
               showSearch
               optionFilterProp="label"
-              options={(artifacts ?? []).map((a) => ({
+              options={artifactOptions.map((a) => ({
                 value: a.id,
                 label: a.fileName,
               }))}
