@@ -1,10 +1,11 @@
-# Production compose — pull multi-arch images from GHCR (linux/amd64 + linux/arm64).
-# Local source build: docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# OmniDrop — one app image (API + Worker + Web) + Redis
+# Multi-arch: linux/amd64, linux/arm64 (GHCR)
 #
-# Usage:
-#   cp .env.example .env   # fill secrets
-#   docker compose pull
-#   docker compose up -d
+#   cp .env.example .env
+#   docker compose pull && docker compose up -d
+#
+# Local build from source:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 name: omnidrop
 
@@ -28,11 +29,9 @@ services:
       retries: 10
       start_period: 5s
     logging: *default-logging
-    networks:
-      - internal
 
-  api:
-    image: ${OMNIDROP_IMAGE_API:-ghcr.io/debbide/omnidrop-api:latest}
+  omnidrop:
+    image: ${OMNIDROP_IMAGE:-ghcr.io/debbide/omnidrop:latest}
     restart: unless-stopped
     env_file: .env
     environment:
@@ -49,6 +48,8 @@ services:
       MAX_DOWNLOAD_CONCURRENCY: ${MAX_DOWNLOAD_CONCURRENCY:-2}
       MAX_UPLOAD_CONCURRENCY: ${MAX_UPLOAD_CONCURRENCY:-3}
       JOB_TMP_TTL_MINUTES: ${JOB_TMP_TTL_MINUTES:-60}
+    ports:
+      - "${WEB_PORT:-8080}:80"
     volumes:
       - db-data:/data/db
       - tmp-data:/data/tmp
@@ -57,68 +58,15 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/v1/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/api/v1/health"]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 25s
+      start_period: 40s
     logging: *default-logging
-    networks:
-      - internal
-
-  worker:
-    image: ${OMNIDROP_IMAGE_WORKER:-ghcr.io/debbide/omnidrop-worker:latest}
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      NODE_ENV: production
-      DATABASE_PATH: /data/db/omnidrop.sqlite
-      TMP_DIR: /data/tmp
-      ARTIFACTS_DIR: /data/artifacts
-      REDIS_URL: redis://redis:6379
-      RCLONE_PATH: rclone
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      MAX_DOWNLOAD_CONCURRENCY: ${MAX_DOWNLOAD_CONCURRENCY:-2}
-      MAX_UPLOAD_CONCURRENCY: ${MAX_UPLOAD_CONCURRENCY:-3}
-      JOB_TMP_TTL_MINUTES: ${JOB_TMP_TTL_MINUTES:-60}
-      OMNIDROP_DATA_KEY: ${OMNIDROP_DATA_KEY}
-    volumes:
-      - db-data:/data/db
-      - tmp-data:/data/tmp
-      - artifacts-data:/data/artifacts
-    depends_on:
-      redis:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    logging: *default-logging
-    networks:
-      - internal
-
-  web:
-    image: ${OMNIDROP_IMAGE_WEB:-ghcr.io/debbide/omnidrop-web:latest}
-    restart: unless-stopped
-    ports:
-      - "${WEB_PORT:-8080}:80"
-    depends_on:
-      api:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    logging: *default-logging
-    networks:
-      - internal
 
 volumes:
   redis-data:
   db-data:
   tmp-data:
   artifacts-data:
-
-networks:
-  internal:
-    driver: bridge

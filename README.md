@@ -25,31 +25,29 @@
 
 ## 快速开始（Docker）
 
-镜像由 GitHub Actions 构建，支持 **linux/amd64** 与 **linux/arm64**（GHCR）。
+**一个镜像** `ghcr.io/debbide/omnidrop`（API + Worker + 面板 + rclone）+ Redis。  
+GitHub Actions 构建 **linux/amd64 + linux/arm64**。
 
-### 生产：拉取多架构镜像
+### 生产：拉镜像
 
 ```bash
 cp .env.example .env
-# 填入 OMNIDROP_DATA_KEY / SESSION_SECRET / APP_BASE_URL
+# 填 OMNIDROP_DATA_KEY / SESSION_SECRET / APP_BASE_URL
 
 docker compose pull
 docker compose up -d
 # http://localhost:8080
 ```
 
-### 本地：从源码构建
+### 本地：源码构建
 
 ```bash
 cp .env.example .env
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-首次访问会引导创建管理员账号（密码 ≥ 10 位）。
-
-**重要：** 请备份 `OMNIDROP_DATA_KEY` 与 SQLite 数据卷；丢失密钥将无法解密已有目标凭据。
-
-更完整的 VPS 步骤见 [deploy/README.md](deploy/README.md)。
+首次访问创建管理员。请备份 `OMNIDROP_DATA_KEY` 与数据卷。  
+详见 [deploy/README.md](deploy/README.md)。
 
 ## 本地开发
 

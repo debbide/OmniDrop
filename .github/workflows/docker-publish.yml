@@ -10,8 +10,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # lowercase owner/repo for GHCR
-  IMAGE_PREFIX: ghcr.io/debbide/omnidrop
+  IMAGE_NAME: ghcr.io/debbide/omnidrop
 
 jobs:
   build-and-push:
@@ -19,21 +18,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: api
-            dockerfile: docker/Dockerfile.api
-            image_suffix: api
-          - name: worker
-            dockerfile: docker/Dockerfile.worker
-            image_suffix: worker
-          - name: web
-            dockerfile: docker/Dockerfile.web
-            image_suffix: web
 
     steps:
       - name: Checkout
@@ -57,7 +41,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.image_suffix }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -69,27 +53,20 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # BuildKit provides TARGETARCH automatically for each platform
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          cache-from: type=gha,scope=omnidrop
+          cache-to: type=gha,mode=max,scope=omnidrop
           provenance: false
 
-  summary:
-    needs: build-and-push
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Print image names
+      - name: Summary
+        if: always()
         run: |
-          echo "Images (multi-arch amd64+arm64):"
-          echo "  ghcr.io/debbide/omnidrop-api:latest"
-          echo "  ghcr.io/debbide/omnidrop-worker:latest"
-          echo "  ghcr.io/debbide/omnidrop-web:latest"
-          echo ""
-          echo "Deploy:"
-          echo "  docker compose pull && docker compose up -d"
+          echo "### OmniDrop image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`ghcr.io/debbide/omnidrop:latest\` (linux/amd64 + linux/arm64)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deploy: \`docker compose pull && docker compose up -d\`" >> "$GITHUB_STEP_SUMMARY"
