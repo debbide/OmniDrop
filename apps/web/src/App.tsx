@@ -12,6 +12,7 @@ import { JobDetailPage } from "./pages/JobDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ArtifactsPage } from "./pages/ArtifactsPage";
 import { TargetDetailPage } from "./pages/TargetDetailPage";
+import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading, needsSetup } = useAuth();
@@ -85,7 +86,14 @@ function RoutesTree() {
         <Route index element={<DashboardPage />} />
         <Route path="artifacts" element={<ArtifactsPage />} />
         <Route path="targets" element={<TargetsPage />} />
-        <Route path="targets/:id" element={<TargetDetailPage />} />
+        <Route
+          path="targets/:id"
+          element={
+            <RouteErrorBoundary>
+              <TargetDetailPage />
+            </RouteErrorBoundary>
+          }
+        />
         <Route path="jobs" element={<JobsPage />} />
         <Route path="jobs/new" element={<JobCreatePage />} />
         <Route path="jobs/:id" element={<JobDetailPage />} />

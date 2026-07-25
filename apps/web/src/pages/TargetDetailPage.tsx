@@ -92,27 +92,36 @@ export function TargetDetailPage() {
         .data.items,
   });
 
-  const currentPath = data?.path ?? path ?? data?.root ?? "/";
-  const jailRoot = data?.root ?? "/";
+const currentPath = data?.path ?? path ?? data?.root ?? "/";
+  const jailRoot =
+    data?.root ??
+    String(
+      (target?.config as { remotePath?: string } | undefined)?.remotePath ?? "/",
+    );
 
   const crumbs = useMemo(() => {
-    const root = jailRoot === "/" ? "" : jailRoot.replace(/\/+$/, "");
-    const cur = currentPath.replace(/\/+$/, "") || "/";
-    if (!cur.startsWith(root) && root) {
-      return [{ title: jailRoot, path: jailRoot }];
+    try {
+      const safeRoot = jailRoot || "/";
+      const root = safeRoot === "/" ? "" : safeRoot.replace(/\/+$/, "");
+      const cur = String(currentPath || "/").replace(/\/+$/, "") || "/";
+      if (root && !cur.startsWith(root)) {
+        return [{ title: safeRoot, path: safeRoot }];
+      }
+      const rel = root ? cur.slice(root.length) : cur;
+      const parts = rel.split("/").filter(Boolean);
+      const items: Array<{ title: string; path: string }> = [
+        { title: safeRoot, path: safeRoot },
+      ];
+      let acc = root || "";
+      for (const p of parts) {
+        acc = `${acc}/${p}`.replace(/\/+/g, "/");
+        if (!acc.startsWith("/")) acc = `/${acc}`;
+        items.push({ title: p, path: acc });
+      }
+      return items;
+    } catch {
+      return [{ title: "/", path: "/" }];
     }
-    const rel = root ? cur.slice(root.length) : cur;
-    const parts = rel.split("/").filter(Boolean);
-    const items: Array<{ title: string; path: string }> = [
-      { title: jailRoot || "/", path: jailRoot || "/" },
-    ];
-    let acc = root || "";
-    for (const p of parts) {
-      acc = `${acc}/${p}`.replace(/\/+/g, "/");
-      if (!acc.startsWith("/")) acc = `/${acc}`;
-      items.push({ title: p, path: acc });
-    }
-    return items;
   }, [currentPath, jailRoot]);
 
   const invalidate = async () => {
@@ -190,10 +199,17 @@ export function TargetDetailPage() {
     }
   };
 
+// Always render shell even when list fails — never leave a blank page
   return (
     <div>
       <Space style={{ marginBottom: 12 }}>
-        <Button icon={<ArrowLeftOutlined />} onClick={() => nav("/targets")}>
+        <Button
+          icon={<ArrowLeftOutlined />}
+          onClick={(e) => {
+            e.preventDefault();
+            nav("/targets");
+          }}
+        >
           返回列表
         </Button>
       </Space>

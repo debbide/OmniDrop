@@ -17,7 +17,7 @@ import {
 import { PlusOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import dayjs from "dayjs";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, type Target } from "../api/client";
 import {
   describeParsed,
@@ -289,13 +289,23 @@ export function TargetsPage() {
               title: "名称",
               dataIndex: "name",
               render: (name, r) => (
-                <button
-                  type="button"
-                  className="linkish"
-                  onClick={() => nav(`/targets/${r.id}`)}
+                <Link
+                  to={`/targets/${r.id}`}
+                  onClick={(e) => {
+                    // Always SPA navigate on plain left-click (no new tab / no blank)
+                    if (
+                      !e.metaKey &&
+                      !e.ctrlKey &&
+                      !e.shiftKey &&
+                      e.button === 0
+                    ) {
+                      e.preventDefault();
+                      nav(`/targets/${r.id}`);
+                    }
+                  }}
                 >
                   {name}
-                </button>
+                </Link>
               ),
             },
             {
@@ -333,9 +343,25 @@ export function TargetsPage() {
               title: "操作",
               render: (_, r) => (
                 <Space wrap>
-                  <Button size="small" type="primary" onClick={() => nav(`/targets/${r.id}`)}>
-                    浏览
-                  </Button>
+                  <Link to={`/targets/${r.id}`}>
+                    <Button
+                      size="small"
+                      type="primary"
+                      onClick={(e) => {
+                        if (
+                          !e.metaKey &&
+                          !e.ctrlKey &&
+                          !e.shiftKey &&
+                          e.button === 0
+                        ) {
+                          e.preventDefault();
+                          nav(`/targets/${r.id}`);
+                        }
+                      }}
+                    >
+                      浏览
+                    </Button>
+                  </Link>
                   <Button size="small" onClick={() => openEdit(r)}>
                     编辑
                   </Button>

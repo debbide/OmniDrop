@@ -16,7 +16,12 @@ const queryClient = new QueryClient({
   },
 });
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const rootEl = document.getElementById("root");
+if (!rootEl) {
+  throw new Error("Root element #root not found");
+}
+
+ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <ConfigProvider
@@ -30,7 +35,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         }}
       >
         <AntApp>
-          <BrowserRouter>
+          <BrowserRouter basename="/">
             <App />
           </BrowserRouter>
         </AntApp>
