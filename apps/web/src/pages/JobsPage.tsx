@@ -17,7 +17,13 @@ export function JobsPage() {
           params: { status, pageSize: 50 },
         })
       ).data,
-    refetchInterval: 5000,
+    refetchInterval: (q) => {
+      const items = q.state.data?.items ?? [];
+      const busy = items.some((j) =>
+        ["queued", "downloading", "uploading", "ready"].includes(j.status),
+      );
+      return busy ? 2000 : 10000;
+    },
   });
 
   return (
@@ -44,7 +50,7 @@ export function JobsPage() {
             ].map((s) => ({ value: s, label: s }))}
           />
           <Button type="primary" onClick={() => nav("/jobs/new")}>
-            新建投递
+            从网址下载
           </Button>
         </Space>
       </Space>
@@ -69,8 +75,22 @@ export function JobsPage() {
             },
             {
               title: "进度",
-              dataIndex: "progressPct",
-              render: (p) => `${p ?? 0}%`,
+              render: (_, r) => {
+                const pct = r.progressPct ?? 0;
+                const done = r.bytesDone ?? 0;
+                const total = r.bytesTotal;
+                const busy = ["downloading", "uploading", "queued"].includes(
+                  r.status,
+                );
+                if (total != null && total > 0) {
+                  return `${pct}% · ${(done / 1024 / 1024).toFixed(1)}/${(total / 1024 / 1024).toFixed(1)} MiB`;
+                }
+                if (busy && done > 0) {
+                  return `${(done / 1024 / 1024).toFixed(2)} MiB…`;
+                }
+                if (busy) return "进行中…";
+                return r.status === "succeeded" ? "100%" : `${pct}%`;
+              },
             },
             {
               title: "创建",

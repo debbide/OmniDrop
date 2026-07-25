@@ -34,6 +34,9 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }
 
+/** Throttle SQLite progress writes per job (SSE still fires every progress tick). */
+const lastDbWriteAt = new Map<string, number>();
+
 const uploadQueue = new Queue(QUEUE_NAMES.UPLOAD, {
   connection: redis,
   defaultJobOptions: {
@@ -131,55 +134,61 @@ export async function processDownload(job: Job<{ jobId: string }>) {
       headers,
       resume: true,
       onProgress: async ({ bytesDone, bytesTotal, resumedFrom, phase }) => {
-        await db
-          .update(jobs)
-          .set({
-            bytesDone,
-            bytesTotal: bytesTotal ?? undefined,
-          })
-          .where(eq(jobs.id, jobId));
-        if (downloadStep) {
-          const pct =
-            bytesTotal && bytesTotal > 0
-              ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
-              : 0;
-          const detail =
-            phase === "hashing"
-              ? "校验 SHA256…"
-              : resumedFrom && resumedFrom > 0
-                ? `断点续传自 ${formatBytes(resumedFrom)}`
-                : null;
+        // Throttle SQLite writes (every ~1s) but publish Redis/SSE every tick
+        // so the UI moves even when Content-Length is unknown.
+        const pct =
+          bytesTotal && bytesTotal > 0
+            ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
+            : 0;
+        const now = Date.now();
+        const prevWrite = lastDbWriteAt.get(jobId) ?? 0;
+        const shouldWriteDb = now - prevWrite > 1000;
+        if (shouldWriteDb) {
+          lastDbWriteAt.set(jobId, now);
           await db
-            .update(jobSteps)
+            .update(jobs)
             .set({
-              progressPct: pct,
-              updatedAt: Date.now(),
-              ...(detail ? { detail } : {}),
+              bytesDone,
+              bytesTotal: bytesTotal ?? undefined,
             })
-            .where(eq(jobSteps.id, downloadStep.id));
+            .where(eq(jobs.id, jobId));
+          if (downloadStep) {
+            const detail =
+              phase === "hashing"
+                ? "校验 SHA256…"
+                : resumedFrom && resumedFrom > 0
+                  ? `断点续传自 ${formatBytes(resumedFrom)} · 已下 ${formatBytes(bytesDone)}`
+                  : `已下载 ${formatBytes(bytesDone)}${
+                      bytesTotal && bytesTotal > 0
+                        ? ` / ${formatBytes(bytesTotal)}`
+                        : ""
+                    }`;
+            await db
+              .update(jobSteps)
+              .set({
+                progressPct: pct,
+                updatedAt: now,
+                detail,
+              })
+              .where(eq(jobSteps.id, downloadStep.id));
+          }
         }
         await setProgressFields(jobId, {
           bytesDone,
           bytesTotal: bytesTotal ?? 0,
           phase: phase ?? "download",
           resumedFrom: resumedFrom ?? 0,
+          progressPct: pct,
         });
-        await publishJobEvent(jobId, "step.updated", {
-          step: StepName.DOWNLOAD,
-          bytesDone,
-          bytesTotal,
-          resumedFrom: resumedFrom ?? 0,
-          phase: phase ?? "downloading",
-        });
+        // Always push live progress to SSE (UI listens to this)
         await publishJobEvent(jobId, "job.updated", {
           id: jobId,
           status: JobStatus.DOWNLOADING,
           bytesDone,
-          bytesTotal,
-          progressPct:
-            bytesTotal && bytesTotal > 0
-              ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
-              : 0,
+          bytesTotal: bytesTotal ?? null,
+          progressPct: pct,
+          phase: phase ?? "downloading",
+          resumedFrom: resumedFrom ?? 0,
         });
       },
     });

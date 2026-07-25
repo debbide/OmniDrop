@@ -6,6 +6,7 @@ import {
   Progress,
   Space,
   Table,
+  Tag,
   Timeline,
   Typography,
 } from "antd";
@@ -24,17 +25,29 @@ function formatBytes(n?: number | null) {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }
 
+function formatSpeed(bps?: number | null) {
+  if (bps == null || bps <= 0 || Number.isNaN(bps)) return null;
+  return `${formatBytes(bps)}/s`;
+}
+
 export function JobDetailPage() {
   const { id } = useParams();
   const { message } = App.useApp();
   const qc = useQueryClient();
-  useJobEvents(id);
+  const { live, sseConnected } = useJobEvents(id);
+
+  const terminalStatuses = ["succeeded", "failed", "canceled", "partial"];
 
   const { data, isLoading } = useQuery({
     queryKey: ["job", id],
     queryFn: async () => (await api.get<JobDetail>(`/jobs/${id}`)).data,
     enabled: !!id,
-    refetchInterval: 4000,
+    // Backup poll; useJobEvents also polls at 1s while running
+    refetchInterval: (q) => {
+      const s = q.state.data?.status;
+      if (s && terminalStatuses.includes(s)) return false;
+      return 2000;
+    },
   });
 
   const cancelMut = useMutation({
@@ -49,7 +62,7 @@ export function JobDetailPage() {
   const retryMut = useMutation({
     mutationFn: () => api.post(`/jobs/${id}/retry`),
     onSuccess: async () => {
-      message.success("已重试失败目标");
+      message.success("已开始重试");
       await qc.invalidateQueries({ queryKey: ["job", id] });
     },
     onError: (err: Error) => message.error(err.message),
@@ -60,36 +73,83 @@ export function JobDetailPage() {
   }
   if (!data) return <Typography.Text>任务不存在</Typography.Text>;
 
-  const terminal = ["succeeded", "failed", "canceled", "partial"].includes(
-    data.status,
-  );
+  const status = live?.status ?? data.status;
+  const bytesDone = live?.bytesDone ?? data.bytesDone ?? 0;
+  const bytesTotal =
+    live?.bytesTotal !== undefined ? live.bytesTotal : data.bytesTotal;
+  const progressPct =
+    live?.progressPct ??
+    data.progressPct ??
+    (bytesTotal && bytesTotal > 0
+      ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
+      : status === "succeeded"
+        ? 100
+        : 0);
+
+  const terminal = terminalStatuses.includes(status);
+  const running = !terminal;
+  // Unknown total size → indeterminate-looking active bar (Ant uses percent 0 + active)
+  const unknownTotal =
+    running && (bytesTotal == null || bytesTotal <= 0) && bytesDone >= 0;
+  const displayPercent = unknownTotal
+    ? bytesDone > 0
+      ? Math.min(99, Math.max(5, progressPct || 15)) // soft hint so bar isn't stuck empty
+      : 0
+    : progressPct;
+
+  const speedLabel = formatSpeed(live?.speedBps);
+  const phaseLabel =
+    live?.phase === "hashing"
+      ? "校验中"
+      : status === "downloading"
+        ? "下载中"
+        : status === "uploading"
+          ? "上传中"
+          : status === "queued"
+            ? "排队中"
+            : null;
 
   return (
     <div>
-      <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }}>
+      <Space
+        style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }}
+      >
         <div>
           <Typography.Title level={3} style={{ margin: 0 }}>
             {data.name || data.fileName || data.id}
           </Typography.Title>
-          <Space style={{ marginTop: 8 }}>
-            <StatusTag status={data.status} />
+          <Space style={{ marginTop: 8 }} wrap>
+            <StatusTag status={status} />
+            {phaseLabel && <Tag color="processing">{phaseLabel}</Tag>}
+            {live?.resumedFrom && live.resumedFrom > 0 && (
+              <Tag color="cyan">断点续传自 {formatBytes(live.resumedFrom)}</Tag>
+            )}
             <Typography.Text type="secondary" className="mono">
               {data.id}
+            </Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {sseConnected ? "实时推送已连接" : "轮询更新中…"}
             </Typography.Text>
           </Space>
         </div>
         <Space>
-          {!terminal && (
-            <Popconfirm title="确认取消任务？" onConfirm={() => cancelMut.mutate()}>
+          {running && (
+            <Popconfirm
+              title="确认取消任务？"
+              onConfirm={() => cancelMut.mutate()}
+            >
               <Button danger loading={cancelMut.isPending}>
                 取消
               </Button>
             </Popconfirm>
           )}
-          {(data.status === "failed" ||
-            data.status === "partial" ||
-            data.status === "canceled") && (
-            <Button onClick={() => retryMut.mutate()} loading={retryMut.isPending}>
+          {(status === "failed" ||
+            status === "partial" ||
+            status === "canceled") && (
+            <Button
+              onClick={() => retryMut.mutate()}
+              loading={retryMut.isPending}
+            >
               {data.targets?.some((t) => t.status === "failed")
                 ? "重试失败上传"
                 : "重试下载（可断点续传）"}
@@ -99,30 +159,56 @@ export function JobDetailPage() {
       </Space>
 
       <div className="page-card" style={{ marginBottom: 16 }}>
-        <Space style={{ width: "100%", justifyContent: "space-between" }}>
-          <Typography.Text>总进度</Typography.Text>
+        <Space
+          style={{ width: "100%", justifyContent: "space-between" }}
+          wrap
+        >
+          <Typography.Text strong>传输进度</Typography.Text>
           <Typography.Text type="secondary">
-            {formatBytes(data.bytesDone)}
-            {data.bytesTotal != null ? ` / ${formatBytes(data.bytesTotal)}` : ""}
-            {data.progressPct != null ? ` · ${data.progressPct}%` : ""}
+            {formatBytes(bytesDone)}
+            {bytesTotal != null && bytesTotal > 0
+              ? ` / ${formatBytes(bytesTotal)}`
+              : running
+                ? " / 总大小未知"
+                : ""}
+            {bytesTotal != null && bytesTotal > 0
+              ? ` · ${progressPct}%`
+              : ""}
+            {speedLabel ? ` · ${speedLabel}` : ""}
           </Typography.Text>
         </Space>
         <Progress
-          percent={data.progressPct}
+          percent={displayPercent}
           status={
-            data.status === "failed"
+            status === "failed"
               ? "exception"
-              : data.status === "succeeded"
+              : status === "succeeded"
                 ? "success"
                 : "active"
           }
+          strokeColor={
+            unknownTotal
+              ? { from: "#1677ff", to: "#69b1ff" }
+              : undefined
+          }
+          format={(p) =>
+            unknownTotal
+              ? bytesDone > 0
+                ? formatBytes(bytesDone)
+                : "…"
+              : `${p}%`
+          }
         />
-        <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-          下载支持 HTTP Range 断点续传（中断重试会从 .part 继续）；上传失败可从文件管理重试整文件上传。
-        </Typography.Paragraph>
+        {unknownTotal && (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            源站未提供文件总大小，进度条按已下载量动态显示；完成后会显示 100%。
+          </Typography.Text>
+        )}
         <Descriptions size="small" column={2} style={{ marginTop: 12 }}>
           <Descriptions.Item label="源类型">{data.sourceType}</Descriptions.Item>
-          <Descriptions.Item label="文件名">{data.fileName}</Descriptions.Item>
+          <Descriptions.Item label="文件名">
+            {data.fileName || "-"}
+          </Descriptions.Item>
           {(data as { artifactId?: string }).artifactId && (
             <Descriptions.Item label="文件管理">
               <Link to="/artifacts">
@@ -137,7 +223,9 @@ export function JobDetailPage() {
             <span className="mono">{data.checksumSha256 || "-"}</span>
           </Descriptions.Item>
           <Descriptions.Item label="大小">
-            {data.bytesTotal != null ? formatBytes(data.bytesTotal) : "-"}
+            {bytesTotal != null && bytesTotal > 0
+              ? formatBytes(bytesTotal)
+              : "-"}
           </Descriptions.Item>
           <Descriptions.Item label="创建">
             {dayjs(data.createdAt).format("YYYY-MM-DD HH:mm:ss")}
@@ -150,51 +238,77 @@ export function JobDetailPage() {
         </Descriptions>
       </div>
 
-      <div className="page-card" style={{ marginBottom: 16 }}>
-        <Typography.Title level={5}>目标进度</Typography.Title>
-        <Table
-          rowKey="id"
-          pagination={false}
-          dataSource={data.targets}
-          columns={[
-            { title: "目标", dataIndex: "name" },
-            { title: "类型", dataIndex: "type" },
-            {
-              title: "状态",
-              dataIndex: "status",
-              render: (s) => <StatusTag status={s} />,
-            },
-            {
-              title: "进度",
-              render: (_, r) => (
-                <div style={{ minWidth: 140 }}>
-                  <Progress percent={r.progressPct} size="small" />
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {formatBytes(r.bytesDone)}
-                    {r.bytesTotal != null ? ` / ${formatBytes(r.bytesTotal)}` : ""}
-                  </Typography.Text>
-                </div>
-              ),
-            },
-            {
-              title: "远端路径",
-              dataIndex: "remoteFinalPath",
-              render: (v) => <span className="mono">{v || "-"}</span>,
-            },
-            {
-              title: "错误",
-              dataIndex: "errorMessage",
-              render: (v) =>
-                v ? <Typography.Text type="danger">{v}</Typography.Text> : "-",
-            },
-          ]}
-        />
-      </div>
+      {Array.isArray(data.targets) && data.targets.length > 0 && (
+        <div className="page-card" style={{ marginBottom: 16 }}>
+          <Typography.Title level={5}>目标进度</Typography.Title>
+          <Table
+            rowKey="id"
+            pagination={false}
+            dataSource={data.targets}
+            columns={[
+              { title: "目标", dataIndex: "name" },
+              { title: "类型", dataIndex: "type" },
+              {
+                title: "状态",
+                dataIndex: "status",
+                render: (s) => <StatusTag status={s} />,
+              },
+              {
+                title: "进度",
+                render: (_, r) => {
+                  const pct = r.progressPct ?? 0;
+                  const unknown = !r.bytesTotal && r.status === "uploading";
+                  return (
+                    <div style={{ minWidth: 160 }}>
+                      <Progress
+                        percent={unknown && r.bytesDone > 0 ? Math.min(99, pct || 20) : pct}
+                        size="small"
+                        status={
+                          r.status === "failed"
+                            ? "exception"
+                            : r.status === "succeeded"
+                              ? "success"
+                              : "active"
+                        }
+                      />
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {formatBytes(r.bytesDone)}
+                        {r.bytesTotal != null
+                          ? ` / ${formatBytes(r.bytesTotal)}`
+                          : r.status === "uploading"
+                            ? " / …"
+                            : ""}
+                      </Typography.Text>
+                    </div>
+                  );
+                },
+              },
+              {
+                title: "远端路径",
+                dataIndex: "remoteFinalPath",
+                render: (v) => (
+                  <span className="mono">{v || "-"}</span>
+                ),
+              },
+              {
+                title: "错误",
+                dataIndex: "errorMessage",
+                render: (v) =>
+                  v ? (
+                    <Typography.Text type="danger">{v}</Typography.Text>
+                  ) : (
+                    "-"
+                  ),
+              },
+            ]}
+          />
+        </div>
+      )}
 
       <div className="page-card">
         <Typography.Title level={5}>步骤时间线</Typography.Title>
         <Timeline
-          items={data.steps.map((s) => ({
+          items={(Array.isArray(data.steps) ? data.steps : []).map((s) => ({
             color:
               s.status === "succeeded"
                 ? "green"

@@ -264,6 +264,7 @@ export async function streamDownloadToFile(opts: {
   });
 
   let lastEmit = 0;
+  let firstChunk = true;
   const transform = new Transform({
     transform(chunk, _enc, cb) {
       void (async () => {
@@ -274,7 +275,9 @@ export async function streamDownloadToFile(opts: {
           }
           bytesDone += chunk.length;
           const now = Date.now();
-          if (opts.onProgress && now - lastEmit > 400) {
+          // Emit immediately on first chunk, then every ~250ms
+          if (opts.onProgress && (firstChunk || now - lastEmit > 250)) {
+            firstChunk = false;
             lastEmit = now;
             await opts.onProgress({
               bytesDone,
