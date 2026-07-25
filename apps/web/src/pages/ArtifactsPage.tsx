@@ -125,7 +125,6 @@ export function ArtifactsPage() {
         style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }}
       >
         <div>
-          <div>
           <Typography.Title level={3} style={{ margin: 0 }}>
             文件管理
           </Typography.Title>
