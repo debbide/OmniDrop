@@ -19,6 +19,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import dayjs from "dayjs";
 import { useNavigate } from "react-router-dom";
 import { api, type Target } from "../api/client";
+import {
+  describeParsed,
+  parseConnectionUri,
+} from "../utils/parseConnectionUri";
 
 export function TargetsPage() {
   const { message } = App.useApp();
@@ -26,8 +30,53 @@ export function TargetsPage() {
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Target | null>(null);
+  const [pasteUri, setPasteUri] = useState("");
   const [form] = Form.useForm();
   const type = Form.useWatch("type", form);
+
+  const applyPasteUri = (raw: string) => {
+    const text = raw.trim();
+    setPasteUri(text);
+    if (!text) return;
+    // Only auto-parse strings that look like connection URIs
+    if (
+      !/^(sftp|ftp|ftps|sftps):\/\//i.test(text) &&
+      !text.includes("@") &&
+      !/^[\w.-]+:\d+/.test(text)
+    ) {
+      return;
+    }
+    const parsed = parseConnectionUri(text);
+    if (!parsed) {
+      message.warning("无法解析该连接串，请检查格式或手动填写");
+      return;
+    }
+    const patch: Record<string, unknown> = {};
+    if (parsed.type) patch.type = parsed.type;
+    if (parsed.host) patch.host = parsed.host;
+    if (parsed.port != null) patch.port = parsed.port;
+    if (parsed.username) patch.username = parsed.username;
+    if (parsed.password) {
+      patch.password = parsed.password;
+      patch.authMethod = "password";
+    }
+    if (parsed.remotePath) patch.remotePath = parsed.remotePath;
+    if (parsed.secure) patch.secure = parsed.secure;
+    if (parsed.authMethod) patch.authMethod = parsed.authMethod;
+    // Suggest name if empty
+    const curName = form.getFieldValue("name");
+    if (!curName && (parsed.username || parsed.host)) {
+      patch.name = [parsed.username, parsed.host].filter(Boolean).join("@");
+    }
+    form.setFieldsValue(patch);
+    if (!parsed.host) {
+      message.warning(
+        `已部分识别：${describeParsed(parsed)}。主机为空时请手动填写。`,
+      );
+    } else {
+      message.success(`已自动填充：${describeParsed(parsed)}`);
+    }
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: ["targets"],
@@ -186,6 +235,7 @@ export function TargetsPage() {
 
   const openCreate = () => {
     setEditing(null);
+    setPasteUri("");
     form.resetFields();
     form.setFieldsValue({
       type: "sftp",
@@ -205,6 +255,7 @@ export function TargetsPage() {
 
   const openEdit = (t: Target) => {
     setEditing(t);
+    setPasteUri("");
     form.setFieldsValue({
       name: t.name,
       type: t.type,
@@ -306,6 +357,33 @@ export function TargetsPage() {
           layout="vertical"
           onFinish={(v) => saveMut.mutate(v)}
         >
+          <Form.Item
+            label="粘贴连接串（自动拆分）"
+            extra="支持 sftp://user:pass@host:port/path 、ftp://… 、user@host:port"
+          >
+            <Input.TextArea
+              value={pasteUri}
+              rows={2}
+              placeholder="sftp://josephanderson05:密码@主机:2022/  粘贴后自动填充下方字段"
+              onChange={(e) => setPasteUri(e.target.value)}
+              onBlur={() => applyPasteUri(pasteUri)}
+              onPaste={(e) => {
+                const text = e.clipboardData.getData("text");
+                if (text?.trim()) {
+                  // let paste apply, then parse
+                  setTimeout(() => applyPasteUri(text), 0);
+                }
+              }}
+            />
+            <Button
+              type="link"
+              size="small"
+              style={{ paddingLeft: 0, marginTop: 4 }}
+              onClick={() => applyPasteUri(pasteUri)}
+            >
+              解析并填充
+            </Button>
+          </Form.Item>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
