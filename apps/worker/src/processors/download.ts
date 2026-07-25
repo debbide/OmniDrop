@@ -77,6 +77,84 @@ async function readGithubToken(): Promise<string | undefined> {
   return env && env.trim() ? env.trim() : undefined;
 }
 
+/**
+ * For HTTP jobs pointing at GitHub, attach the global token so private
+ * repo raw files / release assets / contents API work.
+ * Also rewrites common blob / raw UI URLs to downloadable forms.
+ */
+function attachGithubAuthIfNeeded(
+  inputUrl: string,
+  token: string | undefined,
+): { url: string; headers: Record<string, string> } {
+  let url = inputUrl;
+  const headers: Record<string, string> = {
+    "User-Agent": "OmniDrop",
+  };
+
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return { url, headers };
+  }
+
+  const isGithub =
+    host === "github.com" ||
+    host === "www.github.com" ||
+    host === "raw.githubusercontent.com" ||
+    host === "api.github.com" ||
+    host.endsWith(".github.com") ||
+    host.endsWith(".githubusercontent.com");
+
+  if (!isGithub) return { url, headers };
+
+  // github.com/owner/repo/blob/REF/path → raw.githubusercontent.com/owner/repo/REF/path
+  const blob = url.match(
+    /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+?)(?:\?.*)?$/i,
+  );
+  if (blob) {
+    url = `https://raw.githubusercontent.com/${blob[1]}/${blob[2]}/${blob[3]}/${blob[4]}`;
+    host = "raw.githubusercontent.com";
+  }
+
+  // github.com/owner/repo/raw/REF/path → raw.githubusercontent.com
+  const rawUi = url.match(
+    /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/raw\/([^/]+)\/(.+?)(?:\?.*)?$/i,
+  );
+  if (rawUi) {
+    url = `https://raw.githubusercontent.com/${rawUi[1]}/${rawUi[2]}/${rawUi[3]}/${rawUi[4]}`;
+    host = "raw.githubusercontent.com";
+  }
+
+  if (!token) {
+    logger.warn(
+      { url },
+      "HTTP GitHub URL without token — private files will 404",
+    );
+    return { url, headers };
+  }
+
+  headers.Authorization = `Bearer ${token}`;
+  headers["X-GitHub-Api-Version"] = "2022-11-28";
+
+  // Release asset browser URL / API asset URL
+  if (
+    /github\.com\/[^/]+\/[^/]+\/releases\/download\//i.test(url) ||
+    /api\.github\.com\/repos\/[^/]+\/[^/]+\/releases\/assets\//i.test(url)
+  ) {
+    headers.Accept = "application/octet-stream";
+  } else if (host === "api.github.com" && /\/contents\//i.test(url)) {
+    // Contents API: ask for raw file body
+    headers.Accept = "application/vnd.github.raw";
+  } else if (host === "raw.githubusercontent.com") {
+    headers.Accept = "application/octet-stream";
+  } else {
+    headers.Accept = "application/vnd.github+json, application/octet-stream, */*";
+  }
+
+  return { url, headers };
+}
+
 export async function processDownload(job: Job<{ jobId: string }>) {
   const { jobId } = job.data;
   const db = getDb();
@@ -140,6 +218,12 @@ export async function processDownload(job: Job<{ jobId: string }>) {
       headers.Accept = resolved.accept;
       headers["User-Agent"] = "OmniDrop";
       headers["X-GitHub-Api-Version"] = "2022-11-28";
+    } else if (row.sourceType === SourceType.HTTP) {
+      // Auto-attach global GitHub token for github.com / raw.githubusercontent.com
+      // so private repo files and release assets work via HTTP 直链.
+      const gh = attachGithubAuthIfNeeded(url, await readGithubToken());
+      url = gh.url;
+      Object.assign(headers, gh.headers);
     }
 
     const destDir = jobTempDir(jobId);

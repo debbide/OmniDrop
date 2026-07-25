@@ -223,10 +223,11 @@ export function createRcloneRemoteFs(
           toRemoteSpec(finalPath),
           "--config",
           confPath(confDir),
-          "--progress",
+          // Human stats on stderr for progress parsing (use-json-log breaks line match)
           "--stats",
-          "1s",
+          "500ms",
           "--stats-one-line",
+          "-v",
           // Network flake recovery (whole-file retry with local complete source)
           "--retries",
           "5",
@@ -234,29 +235,15 @@ export function createRcloneRemoteFs(
           "5s",
           "--low-level-retries",
           "10",
-          ];
+        ];
         if (params.overwrite === false) args.push("--ignore-existing");
         await run(
           bin,
           args,
           params.signal,
           (line) => {
-            // Transferred: 1.234 MiB / 10 MiB, 12%, ...
-            const m = line.match(
-              /Transferred:\s+([\d.]+)\s*([KMGTP]?i?B)\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)(?:,\s*(\d+)%)?/i,
-            );
-            if (m && params.onProgress) {
-              const done = parseSize(Number(m[1]), m[2]!);
-              let total = parseSize(Number(m[3]), m[4]!);
-              if ((!total || total < done) && m[5]) {
-                const pct = Number(m[5]);
-                if (pct > 0) total = Math.round((done * 100) / pct);
-              }
-              void params.onProgress({
-                bytesDone: done,
-                bytesTotal: total || done,
-              });
-            }
+            const p = parseRcloneTransferLine(line);
+            if (p && params.onProgress) void params.onProgress(p);
           },
           0, // 0 = no wall-clock timeout for large uploads (cancel via signal)
         );
@@ -280,24 +267,17 @@ export function createRcloneRemoteFs(
             params.localPath,
             "--config",
             confPath(confDir),
-            "--progress",
             "--stats",
-            "1s",
+            "500ms",
             "--stats-one-line",
+            "-v",
             "--retries",
             "3",
           ],
           params.signal,
           (line) => {
-            const m = line.match(
-              /Transferred:\s+([\d.]+)\s*([KMGTP]?i?B)\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)/i,
-            );
-            if (m && params.onProgress) {
-              void params.onProgress({
-                bytesDone: parseSize(Number(m[1]), m[2]!),
-                bytesTotal: parseSize(Number(m[3]), m[4]!),
-              });
-            }
+            const p = parseRcloneTransferLine(line);
+            if (p && params.onProgress) void params.onProgress(p);
           },
         );
       } catch (err) {
@@ -467,17 +447,65 @@ async function writeConf(backend: RcloneBackend, bin: string): Promise<string> {
 }
 
 function parseSize(n: number, unit: string): number {
-  const u = unit.toUpperCase();
-  const mult = u.startsWith("KI")
-    ? 1024
-    : u.startsWith("MI")
-      ? 1024 ** 2
-      : u.startsWith("GI")
-        ? 1024 ** 3
-        : u.startsWith("TI")
-          ? 1024 ** 4
-          : 1;
-  return Math.round(n * mult);
+  const u = unit.toUpperCase().replace(/\s+/g, "");
+  // Support both binary (KiB/MiB) and decimal (KB/MB) suffixes from rclone
+  if (u === "B" || u === "") return Math.round(n);
+  if (u.startsWith("KI") || u === "K" || u === "KB") return Math.round(n * 1024);
+  if (u.startsWith("MI") || u === "M" || u === "MB")
+    return Math.round(n * 1024 ** 2);
+  if (u.startsWith("GI") || u === "G" || u === "GB")
+    return Math.round(n * 1024 ** 3);
+  if (u.startsWith("TI") || u === "T" || u === "TB")
+    return Math.round(n * 1024 ** 4);
+  return Math.round(n);
+}
+
+/** Parse rclone --stats-one-line (and multi-line) transfer progress. */
+export function parseRcloneTransferLine(
+  line: string,
+): { bytesDone: number; bytesTotal: number } | null {
+  // Examples:
+  //   Transferred:   	  1.234 MiB / 10.000 MiB, 12%, 500 KiB/s, ETA 20s
+  //   Transferred: 1.234MiB / 10MiB, 12%, ...
+  //   * file.jar: 50% /10MiB, 1MiB/s, ...
+  const cleaned = line.replace(/\x1b\[[0-9;]*m/g, "").trim();
+  let m = cleaned.match(
+    /Transferred:\s*([\d.]+)\s*([KMGTP]?i?B)\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)(?:,\s*(\d+)%)?/i,
+  );
+  if (m) {
+    const done = parseSize(Number(m[1]), m[2]!);
+    let total = parseSize(Number(m[3]), m[4]!);
+    if ((!total || total < done) && m[5]) {
+      const pct = Number(m[5]);
+      if (pct > 0) total = Math.round((done * 100) / pct);
+    }
+    return { bytesDone: done, bytesTotal: total || done };
+  }
+  // Percent-first form: "file:  45% /12.3MiB"
+  m = cleaned.match(
+    /:\s*(\d+)%\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)/i,
+  );
+  if (m) {
+    const pct = Number(m[1]);
+    const total = parseSize(Number(m[2]), m[3]!);
+    if (total > 0 && pct >= 0) {
+      return {
+        bytesDone: Math.round((total * pct) / 100),
+        bytesTotal: total,
+      };
+    }
+  }
+  // Bare "Transferred: 123456 / 789012 Bytes"
+  m = cleaned.match(
+    /Transferred:\s*([\d.]+)\s*\/\s*([\d.]+)\s*Bytes/i,
+  );
+  if (m) {
+    return {
+      bytesDone: Math.round(Number(m[1])),
+      bytesTotal: Math.round(Number(m[2])),
+    };
+  }
+  return null;
 }
 
 function run(
@@ -510,13 +538,25 @@ function run(
           }, timeoutMs)
         : null;
 
-    const onData = (buf: Buffer) => {
+    // rclone often uses \r for progress refresh — split on both \r and \n
+    let stdoutCarry = "";
+    let stderrCarry = "";
+    const feed = (which: "out" | "err", buf: Buffer) => {
       const text = buf.toString("utf8");
-      stderr += text;
-      for (const line of text.split(/\r?\n/)) if (line.trim()) onLine?.(line);
+      if (which === "err") stderr += text;
+      const carry = which === "out" ? stdoutCarry : stderrCarry;
+      const combined = carry + text;
+      const parts = combined.split(/\r\n|\n|\r/);
+      const nextCarry = parts.pop() ?? "";
+      if (which === "out") stdoutCarry = nextCarry;
+      else stderrCarry = nextCarry;
+      for (const line of parts) {
+        const t = line.trim();
+        if (t) onLine?.(t);
+      }
     };
-    child.stdout?.on("data", onData);
-    child.stderr?.on("data", onData);
+    child.stdout?.on("data", (b: Buffer) => feed("out", b));
+    child.stderr?.on("data", (b: Buffer) => feed("err", b));
     const onAbort = () => {
       try {
         child.kill("SIGTERM");

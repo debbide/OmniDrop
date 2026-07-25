@@ -148,10 +148,86 @@ export function useJobEvents(jobId: string | undefined): {
       const onEvent = (ev: MessageEvent) => {
         try {
           const data = JSON.parse(String(ev.data)) as Record<string, unknown>;
-          // Full job snapshot from first event or finished
-          if (data && typeof data === "object") {
+          if (!data || typeof data !== "object") return;
+
+          const eventName = (ev as MessageEvent & { type?: string }).type
+            || "";
+
+          // target.updated: patch one target row + surface bytes on job bar during upload
+          if (eventName === "target.updated" || data.jobTargetId) {
+            const tid = String(
+              data.jobTargetId ?? data.id ?? "",
+            );
+            const tBytes =
+              typeof data.bytesDone === "number" ? data.bytesDone : undefined;
+            const tTotal =
+              typeof data.bytesTotal === "number"
+                ? data.bytesTotal
+                : data.bytesTotal === null
+                  ? null
+                  : undefined;
+            const tPct =
+              typeof data.progressPct === "number"
+                ? data.progressPct
+                : tBytes != null && tTotal != null && tTotal > 0
+                  ? Math.min(100, Math.round((tBytes / tTotal) * 100))
+                  : undefined;
+
+            // During upload, top bar should follow target transfer
+            if (tBytes != null || tPct != null || data.status === "uploading") {
+              mergeProgress({
+                bytesDone: tBytes,
+                bytesTotal: tTotal,
+                progressPct: tPct,
+                status:
+                  typeof data.status === "string" &&
+                  data.status === "uploading"
+                    ? "uploading"
+                    : undefined,
+                phase: "uploading",
+              });
+            }
+
+            if (tid) {
+              qc.setQueryData<JobDetail>(["job", jobId], (old) => {
+                if (!old?.targets) return old;
+                return {
+                  ...old,
+                  status:
+                    data.status === "uploading" ? "uploading" : old.status,
+                  bytesDone: tBytes ?? old.bytesDone,
+                  bytesTotal:
+                    tTotal !== undefined ? tTotal : old.bytesTotal,
+                  progressPct: tPct ?? old.progressPct,
+                  targets: old.targets.map((t) =>
+                    t.id === tid
+                      ? {
+                          ...t,
+                          status:
+                            typeof data.status === "string"
+                              ? data.status
+                              : t.status,
+                          bytesDone: tBytes ?? t.bytesDone,
+                          bytesTotal:
+                            tTotal !== undefined ? tTotal : t.bytesTotal,
+                          progressPct: tPct ?? t.progressPct,
+                          errorMessage:
+                            typeof data.errorMessage === "string"
+                              ? data.errorMessage
+                              : t.errorMessage,
+                          remoteFinalPath:
+                            typeof data.remoteFinalPath === "string"
+                              ? data.remoteFinalPath
+                              : t.remoteFinalPath,
+                        }
+                      : t,
+                  ),
+                };
+              });
+            }
+          } else {
+            // job.updated / job.finished / full snapshot
             mergeProgress(data);
-            // nested targets progress
             if (Array.isArray(data.targets)) {
               qc.setQueryData<JobDetail>(["job", jobId], (old) => {
                 if (!old) return old;
@@ -167,7 +243,7 @@ export function useJobEvents(jobId: string | undefined): {
         } catch {
           /* ignore malformed */
         }
-        // Also schedule a full refetch for steps/targets consistency
+        // Full refetch less often for consistency (steps list etc.)
         hardRefresh();
       };
 
@@ -212,12 +288,47 @@ export function useJobEvents(jobId: string | undefined): {
           if (pollTimer) window.clearInterval(pollTimer);
           pollTimer = undefined;
         }
-        mergeProgress({
-          bytesDone: detail.bytesDone,
-          bytesTotal: detail.bytesTotal,
-          progressPct: detail.progressPct,
-          status: detail.status,
-        });
+        // Prefer active target transfer bytes when uploading
+        const activeUpload = (detail.targets ?? []).find(
+          (t) => t.status === "uploading",
+        );
+        const anySucceeded = (detail.targets ?? []).some(
+          (t) => t.status === "succeeded",
+        );
+        const pick =
+          activeUpload ??
+          (detail.status === "uploading"
+            ? (detail.targets ?? []).find((t) => (t.bytesDone ?? 0) > 0)
+            : undefined);
+        if (pick && (detail.status === "uploading" || activeUpload)) {
+          const tDone = pick.bytesDone ?? 0;
+          const tTotal = pick.bytesTotal ?? detail.bytesTotal;
+          const tPct =
+            tTotal && tTotal > 0
+              ? Math.min(100, Math.round((tDone / tTotal) * 100))
+              : pick.progressPct;
+          mergeProgress({
+            bytesDone: tDone,
+            bytesTotal: tTotal,
+            progressPct: tPct,
+            status: detail.status,
+            phase: "uploading",
+          });
+        } else if (anySucceeded && detail.status === "succeeded") {
+          mergeProgress({
+            bytesDone: detail.bytesDone,
+            bytesTotal: detail.bytesTotal,
+            progressPct: 100,
+            status: detail.status,
+          });
+        } else {
+          mergeProgress({
+            bytesDone: detail.bytesDone,
+            bytesTotal: detail.bytesTotal,
+            progressPct: detail.progressPct,
+            status: detail.status,
+          });
+        }
       }).catch(() => undefined);
     }, 1000);
 

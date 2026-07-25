@@ -16,7 +16,11 @@ export {
   isJailRoot,
 } from "./jail.js";
 export { createRemoteFs, getTargetJailRoot } from "./factory.js";
-export { createRcloneRemoteFs, createRcloneFromTarget } from "./rclone.js";
+export {
+  createRcloneRemoteFs,
+  createRcloneFromTarget,
+  parseRcloneTransferLine,
+} from "./rclone.js";
 export { createPterodactylRemoteFs } from "./pterodactyl.js";
 export {
   humanizeRemoteError,

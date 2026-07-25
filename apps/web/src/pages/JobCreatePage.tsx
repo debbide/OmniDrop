@@ -138,7 +138,9 @@ export function JobCreatePage() {
             ② 之后在 <Link to="/artifacts">文件管理</Link>{" "}
             里管理这些文件；需要发到服务器时再点「上传到目标」。
             <br />
-            GitHub 私库请先在 <Link to="/settings">设置</Link> 配置 Token。
+            GitHub 私库请先在 <Link to="/settings">设置</Link>{" "}
+            配置 Token。HTTP 直链若是 github.com / raw.githubusercontent.com
+            也会自动带上该 Token（可下私库文件）。
           </span>
         }
       />
@@ -189,7 +191,7 @@ export function JobCreatePage() {
               placeholder={
                 sourceType === "github_release"
                   ? "https://github.com/org/repo"
-                  : "https://example.com/plugin.jar 或 GitHub releases/download/..."
+                  : "https://example.com/a.jar · 或 raw.githubusercontent.com/... · 或 github.com/.../releases/download/..."
               }
             />
           </Form.Item>

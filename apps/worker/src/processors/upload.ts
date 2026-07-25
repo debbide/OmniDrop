@@ -115,6 +115,9 @@ export async function processUpload(
       { rclonePath: workerConfig.RCLONE_PATH },
     );
 
+    // Throttle SQLite writes; still push SSE every tick for live UI
+    let lastDbWrite = 0;
+    const totalHint = parent.bytesTotal ?? 0;
     const result = await adapter.upload({
       localPath,
       remoteDir,
@@ -122,36 +125,68 @@ export async function processUpload(
       overwrite: options.overwrite !== false,
       signal: ac.signal,
       onProgress: async ({ bytesDone, bytesTotal }) => {
-        await db
-          .update(jobTargets)
-          .set({ bytesDone, bytesTotal })
-          .where(eq(jobTargets.id, jobTargetId));
-        if (step) {
-          const pct =
-            bytesTotal > 0
-              ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
-              : 0;
+        const total = bytesTotal > 0 ? bytesTotal : totalHint;
+        const pct =
+          total > 0 ? Math.min(100, Math.round((bytesDone / total) * 100)) : 0;
+        const now = Date.now();
+        if (now - lastDbWrite > 800) {
+          lastDbWrite = now;
           await db
-            .update(jobSteps)
-            .set({ progressPct: pct, updatedAt: Date.now() })
-            .where(eq(jobSteps.id, step.id));
+            .update(jobTargets)
+            .set({
+              bytesDone,
+              bytesTotal: total > 0 ? total : undefined,
+            })
+            .where(eq(jobTargets.id, jobTargetId));
+          // Mirror onto parent job so top progress bar / polling see movement
+          await db
+            .update(jobs)
+            .set({
+              bytesDone,
+              bytesTotal: total > 0 ? total : parent.bytesTotal,
+              status: JobStatus.UPLOADING,
+            })
+            .where(eq(jobs.id, jobId));
+          if (step) {
+            await db
+              .update(jobSteps)
+              .set({
+                progressPct: pct,
+                updatedAt: now,
+                detail: `上传 ${bytesDone}${total > 0 ? ` / ${total}` : ""}`,
+              })
+              .where(eq(jobSteps.id, step.id));
+          }
         }
+        // Always emit both events so SSE clients refresh job + target rows
         await publishJobEvent(jobId, "target.updated", {
           jobTargetId,
+          id: jobTargetId,
           bytesDone,
-          bytesTotal,
+          bytesTotal: total > 0 ? total : null,
+          progressPct: pct,
           status: JobTargetStatus.UPLOADING,
+        });
+        await publishJobEvent(jobId, "job.updated", {
+          id: jobId,
+          status: JobStatus.UPLOADING,
+          bytesDone,
+          bytesTotal: total > 0 ? total : parent.bytesTotal ?? null,
+          progressPct: pct,
+          phase: "uploading",
         });
       },
     });
 
     const doneAt = Date.now();
+    const finalBytes = parent.bytesTotal ?? jt.bytesTotal ?? jt.bytesDone ?? 0;
     await db
       .update(jobTargets)
       .set({
         status: JobTargetStatus.SUCCEEDED,
         remoteFinalPath: result.remoteFinalPath,
-        bytesDone: parent.bytesTotal ?? jt.bytesDone,
+        bytesDone: finalBytes,
+        bytesTotal: finalBytes || parent.bytesTotal,
         finishedAt: doneAt,
       })
       .where(eq(jobTargets.id, jobTargetId));
@@ -170,8 +205,20 @@ export async function processUpload(
 
     await publishJobEvent(jobId, "target.updated", {
       jobTargetId,
+      id: jobTargetId,
       status: JobTargetStatus.SUCCEEDED,
+      bytesDone: finalBytes,
+      bytesTotal: finalBytes || parent.bytesTotal,
+      progressPct: 100,
       remoteFinalPath: result.remoteFinalPath,
+    });
+    await publishJobEvent(jobId, "job.updated", {
+      id: jobId,
+      status: JobStatus.UPLOADING,
+      bytesDone: finalBytes,
+      bytesTotal: finalBytes || parent.bytesTotal,
+      progressPct: 100,
+      phase: "uploading",
     });
 
     await finalizeParentJob(jobId);
