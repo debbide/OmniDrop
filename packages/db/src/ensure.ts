@@ -41,6 +41,7 @@ export async function ensureDatabase(databasePath: string): Promise<Db> {
   await addColumnIfMissing("sessions", "last_seen_at", "last_seen_at INTEGER");
   await addColumnIfMissing("sessions", "revoked_at", "revoked_at INTEGER");
   await addColumnIfMissing("jobs", "artifact_id", "artifact_id TEXT");
+  await addColumnIfMissing("artifacts", "note", "note TEXT");
 
   return db;
 }

@@ -180,9 +180,15 @@ export const settingsBodySchema = z.object({
   githubToken: z.string().optional().nullable(),
 });
 
-export const renameArtifactBodySchema = z.object({
-  fileName: z.string().min(1).max(200),
-});
+export const renameArtifactBodySchema = z
+  .object({
+    fileName: z.string().min(1).max(200).optional(),
+    /** Free-form note (empty string clears). */
+    note: z.string().max(500).optional().nullable(),
+  })
+  .refine((v) => v.fileName !== undefined || v.note !== undefined, {
+    message: "fileName or note is required",
+  });
 
 export const dispatchArtifactBodySchema = z.object({
   targetIds: z.array(z.string().min(1)).min(1),

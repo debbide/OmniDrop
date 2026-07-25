@@ -62,10 +62,14 @@ artifactsRouter.patch(
       const body = renameArtifactBodySchema.parse(req.body);
       const meta = clientMeta(req);
       res.json(
-        await artifactService.renameArtifact(paramId(req), body.fileName, {
-          userId: req.user!.id,
-          ...meta,
-        }),
+        await artifactService.updateArtifact(
+          paramId(req),
+          { fileName: body.fileName, note: body.note },
+          {
+            userId: req.user!.id,
+            ...meta,
+          },
+        ),
       );
     } catch (err) {
       sendError(res, asAppError(err));

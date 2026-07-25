@@ -21,6 +21,8 @@ export type FsDownloadPayload = {
   targetId: string;
   remotePath: string;
   userId?: string;
+  /** Optional note; defaults to target name when omitted */
+  note?: string | null;
 };
 
 async function sha256File(filePath: string): Promise<string> {
@@ -48,7 +50,16 @@ export async function processFsDownload(job: Job<FsDownloadPayload>) {
   const artifactId = `art_${jobId.replace(/^fsd_/, "")}`;
   const dest = path.join(artifactsDir(), artifactId);
 
-  logger.info({ jobId, targetId, jailed, dest }, "FS download start");
+  // Default note = target name so library rows show which server they came from
+  const rawNote =
+    job.data.note != null && String(job.data.note).trim() !== ""
+      ? String(job.data.note).trim()
+      : loaded.target.name
+        ? `来自：${loaded.target.name}`
+        : null;
+  const note = rawNote ? rawNote.slice(0, 500) : null;
+
+  logger.info({ jobId, targetId, jailed, dest, note }, "FS download start");
   await adapter.download({ remotePath: jailed, localPath: dest });
 
   const st = await fs.stat(dest);
@@ -65,6 +76,7 @@ export async function processFsDownload(job: Job<FsDownloadPayload>) {
     sourceType: "remote",
     sourceUrl: `${loaded.target.type}://${targetId}${jailed}`,
     sourceJobId: jobId,
+    note,
     createdBy: userId ?? null,
     createdAt: now,
     updatedAt: now,
@@ -72,11 +84,17 @@ export async function processFsDownload(job: Job<FsDownloadPayload>) {
 
   await redis.set(
     `fs-download:${jobId}`,
-    JSON.stringify({ status: "succeeded", artifactId, fileName, sizeBytes: st.size }),
+    JSON.stringify({
+      status: "succeeded",
+      artifactId,
+      fileName,
+      sizeBytes: st.size,
+      note,
+    }),
     "EX",
     86400,
   );
 
-  logger.info({ jobId, artifactId, size: st.size }, "FS download done");
+  logger.info({ jobId, artifactId, size: st.size, note }, "FS download done");
   return { artifactId };
 }

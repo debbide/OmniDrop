@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   App,
@@ -27,7 +27,7 @@ import {
   UploadOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import dayjs from "dayjs";
 import { api, type Target } from "../api/client";
 
@@ -56,6 +56,7 @@ function formatBytes(n?: number | null) {
 export function TargetDetailPage() {
   const { id } = useParams();
   const nav = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { message } = App.useApp();
   const qc = useQueryClient();
   const [path, setPath] = useState<string | undefined>(undefined);
@@ -63,9 +64,22 @@ export function TargetDetailPage() {
   const [mkdirOpen, setMkdirOpen] = useState(false);
   const [renameEntry, setRenameEntry] = useState<RemoteEntry | null>(null);
   const [artifactUploadOpen, setArtifactUploadOpen] = useState(false);
+  const [pendingUploadArtifactId, setPendingUploadArtifactId] = useState<
+    string | null
+  >(null);
   const [mkdirForm] = Form.useForm();
   const [renameForm] = Form.useForm();
   const [artifactForm] = Form.useForm();
+
+  // From 文件管理 →「上传到目标」: /targets/:id?uploadArtifact=art_xxx
+  useEffect(() => {
+    const aid = searchParams.get("uploadArtifact");
+    if (!aid) return;
+    setPendingUploadArtifactId(aid);
+    const next = new URLSearchParams(searchParams);
+    next.delete("uploadArtifact");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const { data: target } = useQuery({
     queryKey: ["target", id],
@@ -91,15 +105,25 @@ export function TargetDetailPage() {
     queryKey: ["artifacts", "select-options"],
     queryFn: async () => {
       const res = await api.get<{
-        items?: Array<{ id: string; fileName: string }>;
+        items?: Array<{ id: string; fileName: string; note?: string | null }>;
       }>("/artifacts");
       const body = res.data as
-        | { items?: Array<{ id: string; fileName: string }> }
-        | Array<{ id: string; fileName: string }>
+        | {
+            items?: Array<{
+              id: string;
+              fileName: string;
+              note?: string | null;
+            }>;
+          }
+        | Array<{ id: string; fileName: string; note?: string | null }>
         | undefined;
       if (Array.isArray(body)) return body;
       if (body && Array.isArray(body.items)) return body.items;
-      return [] as Array<{ id: string; fileName: string }>;
+      return [] as Array<{
+        id: string;
+        fileName: string;
+        note?: string | null;
+      }>;
     },
   });
   const artifactOptions = Array.isArray(artifactsRaw) ? artifactsRaw : [];
@@ -194,11 +218,22 @@ export function TargetDetailPage() {
         overwrite: true,
       }),
     onSuccess: (res) => {
-      message.success(`已入队上传：${res.data.jobId}`);
+      message.success(`已入队上传到 ${currentPath}：${res.data.jobId}`);
       setArtifactUploadOpen(false);
+      setPendingUploadArtifactId(null);
+      void invalidate();
     },
     onError: (e: Error) => message.error(e.message),
   });
+
+  const pendingArtifact = pendingUploadArtifactId
+    ? artifactOptions.find((a) => a.id === pendingUploadArtifactId)
+    : undefined;
+
+  const uploadPendingToCurrentDir = () => {
+    if (!pendingUploadArtifactId) return;
+    artifactUploadMut.mutate({ artifactId: pendingUploadArtifactId });
+  };
 
   const goParent = () => {
     if (!data) return;
@@ -244,6 +279,40 @@ export function TargetDetailPage() {
       </Space>
 
       <div className="page-card">
+        {pendingUploadArtifactId && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={
+              pendingArtifact
+                ? `待上传：${pendingArtifact.fileName}${
+                    pendingArtifact.note ? ` · ${pendingArtifact.note}` : ""
+                  }`
+                : "待上传产物"
+            }
+            description={
+              <div>
+                <div>
+                  请浏览到目标目录，然后点「上传到此目录」。当前目录：
+                  <Typography.Text code>{currentPath}</Typography.Text>
+                </div>
+                <Space style={{ marginTop: 8 }} wrap>
+                  <Button
+                    type="primary"
+                    loading={artifactUploadMut.isPending}
+                    onClick={uploadPendingToCurrentDir}
+                  >
+                    上传到此目录
+                  </Button>
+                  <Button onClick={() => setPendingUploadArtifactId(null)}>
+                    取消
+                  </Button>
+                </Space>
+              </div>
+            }
+          />
+        )}
         <Space wrap style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
           <Breadcrumb
             items={breadcrumbItems.map((c, i) => ({
@@ -302,7 +371,18 @@ export function TargetDetailPage() {
             >
               <Button icon={<UploadOutlined />}>上传本地文件</Button>
             </Upload>
-            <Button onClick={() => setArtifactUploadOpen(true)}>从产物库上传</Button>
+            <Button
+              onClick={() => {
+                setArtifactUploadOpen(true);
+                if (pendingUploadArtifactId) {
+                  artifactForm.setFieldsValue({
+                    artifactId: pendingUploadArtifactId,
+                  });
+                }
+              }}
+            >
+              从产物库上传
+            </Button>
             <Popconfirm
               title={`删除选中的 ${selected.length} 项？`}
               disabled={!selected.length}
@@ -498,7 +578,9 @@ export function TargetDetailPage() {
               optionFilterProp="label"
               options={artifactOptions.map((a) => ({
                 value: a.id,
-                label: a.fileName,
+                label: a.note
+                  ? `${a.fileName} · ${a.note}`
+                  : a.fileName,
               }))}
             />
           </Form.Item>
@@ -510,7 +592,8 @@ export function TargetDetailPage() {
 
       <Typography.Paragraph type="secondary" style={{ marginTop: 12 }}>
         提示：双击目录进入。下载到产物库为异步任务，完成后可在{" "}
-        <Link to="/artifacts">产物库</Link> 查看。
+        <Link to="/artifacts">产物库</Link>{" "}
+        查看（备注会自动填「来自：{target?.name ?? "目标名"}」）。
       </Typography.Paragraph>
     </div>
   );

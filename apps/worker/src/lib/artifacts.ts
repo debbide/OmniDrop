@@ -37,6 +37,7 @@ export async function promoteJobArtifact(opts: {
   sourceType?: string | null;
   sourceUrl?: string | null;
   createdBy?: string | null;
+  note?: string | null;
 }): Promise<string> {
   await ensureArtifactsDir();
   const db = getDb();
@@ -47,6 +48,10 @@ export async function promoteJobArtifact(opts: {
   const dest = path.join(artifactsDir(), id);
   await fs.copyFile(opts.tempPath, dest);
   const now = Date.now();
+  const note =
+    opts.note == null || String(opts.note).trim() === ""
+      ? null
+      : String(opts.note).trim().slice(0, 500);
   await db.insert(artifacts).values({
     id,
     fileName: opts.fileName,
@@ -57,6 +62,7 @@ export async function promoteJobArtifact(opts: {
     sourceType: opts.sourceType ?? null,
     sourceUrl: opts.sourceUrl ?? null,
     sourceJobId: opts.jobId,
+    note,
     createdBy: opts.createdBy ?? null,
     createdAt: now,
     updatedAt: now,

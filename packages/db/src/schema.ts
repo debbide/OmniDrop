@@ -92,6 +92,8 @@ export const artifacts = sqliteTable(
     sourceType: text("source_type"),
     sourceUrl: text("source_url"),
     sourceJobId: text("source_job_id"),
+    /** Free-form note, e.g. which target server the file came from */
+    note: text("note"),
     createdBy: text("created_by").references(() => users.id),
     createdAt: integer("created_at", { mode: "number" }).notNull(),
     updatedAt: integer("updated_at", { mode: "number" }).notNull(),

@@ -40,9 +40,6 @@ export function AppLayout() {
             <CloudUploadOutlined />
             OmniDrop
           </div>
-          <Typography.Text style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}>
-            万能空投
-          </Typography.Text>
         </div>
         <Menu
           theme="dark"

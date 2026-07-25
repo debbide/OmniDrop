@@ -32,6 +32,7 @@ type Artifact = {
   checksumSha256: string;
   sourceType: string | null;
   sourceUrl: string | null;
+  note: string | null;
   createdAt: number;
 };
 
@@ -47,10 +48,10 @@ export function ArtifactsPage() {
   const qc = useQueryClient();
   const nav = useNavigate();
   const [shareArt, setShareArt] = useState<Artifact | null>(null);
-  const [dispatchArt, setDispatchArt] = useState<Artifact | null>(null);
+  const [uploadArt, setUploadArt] = useState<Artifact | null>(null);
   const [renameArt, setRenameArt] = useState<Artifact | null>(null);
   const [shareForm] = Form.useForm();
-  const [dispatchForm] = Form.useForm();
+  const [uploadForm] = Form.useForm();
   const [renameForm] = Form.useForm();
   const [createdShareUrl, setCreatedShareUrl] = useState<string | null>(null);
 
@@ -87,10 +88,17 @@ export function ArtifactsPage() {
   });
 
   const renameMut = useMutation({
-    mutationFn: ({ id, fileName }: { id: string; fileName: string }) =>
-      api.patch(`/artifacts/${id}`, { fileName }),
+    mutationFn: ({
+      id,
+      fileName,
+      note,
+    }: {
+      id: string;
+      fileName: string;
+      note?: string | null;
+    }) => api.patch(`/artifacts/${id}`, { fileName, note }),
     onSuccess: async () => {
-      message.success("已重命名");
+      message.success("已保存");
       setRenameArt(null);
       await qc.invalidateQueries({ queryKey: ["artifacts"] });
     },
@@ -104,20 +112,6 @@ export function ArtifactsPage() {
       setCreatedShareUrl(res.data.url as string);
       message.success("分享链接已创建（仅显示一次，请复制）");
       void qc.invalidateQueries({ queryKey: ["artifacts"] });
-    },
-    onError: (e: Error) => message.error(e.message),
-  });
-
-  const dispatchMut = useMutation({
-    mutationFn: (values: { targetIds: string[] }) =>
-      api.post(`/artifacts/${dispatchArt!.id}/dispatch`, {
-        targetIds: values.targetIds,
-        options: { overwrite: true },
-      }),
-    onSuccess: (res) => {
-      message.success("已开始上传到目标");
-      setDispatchArt(null);
-      nav(`/jobs/${res.data.jobId}`);
     },
     onError: (e: Error) => message.error(e.message),
   });
@@ -138,7 +132,7 @@ export function ArtifactsPage() {
           <Typography.Text type="secondary">
             本站存储（下载后的文件）。共 {data?.total ?? 0} 个 ·{" "}
             {formatBytes(data?.totalBytes ?? 0)}
-            。在此重命名 / 删除 / 下载 / 分享；需要发到服务器时点「上传到目标」。
+            。在此编辑 / 删除 / 下载 / 分享；需要发到服务器时点「上传到目标」，进入该目标文件浏览器后选择目录再上传。
           </Typography.Text>
         </div>
         <Button type="primary" onClick={() => nav("/jobs/new")}>
@@ -153,6 +147,18 @@ export function ArtifactsPage() {
           dataSource={data?.items ?? []}
           columns={[
             { title: "文件名", dataIndex: "fileName" },
+            {
+              title: "备注",
+              dataIndex: "note",
+              ellipsis: true,
+              width: 200,
+              render: (v: string | null) =>
+                v ? (
+                  <Typography.Text title={v}>{v}</Typography.Text>
+                ) : (
+                  <Typography.Text type="secondary">—</Typography.Text>
+                ),
+            },
             {
               title: "大小",
               dataIndex: "sizeBytes",
@@ -189,10 +195,13 @@ export function ArtifactsPage() {
                     icon={<EditOutlined />}
                     onClick={() => {
                       setRenameArt(r);
-                      renameForm.setFieldsValue({ fileName: r.fileName });
+                      renameForm.setFieldsValue({
+                        fileName: r.fileName,
+                        note: r.note ?? "",
+                      });
                     }}
                   >
-                    重命名
+                    编辑
                   </Button>
                   <Button
                     size="small"
@@ -213,8 +222,8 @@ export function ArtifactsPage() {
                     type="primary"
                     icon={<SendOutlined />}
                     onClick={() => {
-                      setDispatchArt(r);
-                      dispatchForm.resetFields();
+                      setUploadArt(r);
+                      uploadForm.resetFields();
                     }}
                   >
                     上传到目标
@@ -235,21 +244,38 @@ export function ArtifactsPage() {
       </div>
 
       <Modal
-        title="重命名"
+        title="编辑产物"
         open={!!renameArt}
         onCancel={() => setRenameArt(null)}
         onOk={() => renameForm.submit()}
         confirmLoading={renameMut.isPending}
+        okText="保存"
       >
         <Form
           form={renameForm}
           layout="vertical"
           onFinish={(v) =>
-            renameMut.mutate({ id: renameArt!.id, fileName: v.fileName })
+            renameMut.mutate({
+              id: renameArt!.id,
+              fileName: v.fileName,
+              note: v.note ?? "",
+            })
           }
         >
           <Form.Item name="fileName" label="文件名" rules={[{ required: true }]}>
             <Input />
+          </Form.Item>
+          <Form.Item
+            name="note"
+            label="备注"
+            extra="例如来自哪台服务器，方便同名文件区分"
+          >
+            <Input.TextArea
+              rows={2}
+              maxLength={500}
+              showCount
+              placeholder="来自：生产服 / 测试服 …"
+            />
           </Form.Item>
         </Form>
       </Modal>
@@ -315,24 +341,33 @@ export function ArtifactsPage() {
       </Drawer>
 
       <Modal
-        title={`上传到目标 · ${dispatchArt?.fileName ?? ""}`}
-        open={!!dispatchArt}
-        onCancel={() => setDispatchArt(null)}
-        onOk={() => dispatchForm.submit()}
-        confirmLoading={dispatchMut.isPending}
-        okText="开始上传"
+        title={`上传到目标 · ${uploadArt?.fileName ?? ""}`}
+        open={!!uploadArt}
+        onCancel={() => setUploadArt(null)}
+        onOk={() => uploadForm.submit()}
+        okText="打开文件浏览器"
       >
         <Typography.Paragraph type="secondary">
-          将产物库中的文件上传到已启用的目标服务器（SFTP / FTP / WebDAV / 翼龙）。
+          选择目标后进入其远端文件浏览器，浏览到目标目录再上传（不会直接传到根目录）。
         </Typography.Paragraph>
-        <Form form={dispatchForm} layout="vertical" onFinish={(v) => dispatchMut.mutate(v)}>
+        <Form
+          form={uploadForm}
+          layout="vertical"
+          onFinish={(v: { targetId: string }) => {
+            if (!uploadArt) return;
+            const art = uploadArt;
+            setUploadArt(null);
+            nav(`/targets/${v.targetId}?uploadArtifact=${encodeURIComponent(art.id)}`);
+          }}
+        >
           <Form.Item
-            name="targetIds"
+            name="targetId"
             label="目标服务器"
-            rules={[{ required: true, message: "请选择至少一个目标" }]}
+            rules={[{ required: true, message: "请选择目标" }]}
           >
             <Select
-              mode="multiple"
+              showSearch
+              optionFilterProp="label"
               placeholder={
                 enabledTargets.length
                   ? "选择目标"

@@ -47,6 +47,7 @@ function publicArtifact(row: typeof artifacts.$inferSelect) {
     sourceType: row.sourceType,
     sourceUrl: row.sourceUrl,
     sourceJobId: row.sourceJobId,
+    note: row.note ?? null,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -89,32 +90,63 @@ export async function getArtifact(id: string) {
   return { row, public: publicArtifact(row) };
 }
 
+export async function updateArtifact(
+  id: string,
+  patch: { fileName?: string; note?: string | null },
+  actor: { userId: string; ip?: string; userAgent?: string },
+) {
+  const { row } = await getArtifact(id);
+  const db = getDb();
+  const updates: {
+    fileName?: string;
+    note?: string | null;
+    updatedAt: number;
+  } = { updatedAt: Date.now() };
+  const meta: Record<string, unknown> = {};
+
+  if (patch.fileName !== undefined) {
+    const safe = sanitizeFileName(patch.fileName);
+    if (safe.includes("..") || !safe) {
+      throw new AppError(400, "VALIDATION_ERROR", "Invalid file name");
+    }
+    updates.fileName = safe;
+    meta.from = row.fileName;
+    meta.to = safe;
+  }
+  if (patch.note !== undefined) {
+    const note =
+      patch.note == null || String(patch.note).trim() === ""
+        ? null
+        : String(patch.note).trim().slice(0, 500);
+    updates.note = note;
+    meta.noteFrom = row.note;
+    meta.noteTo = note;
+  }
+
+  await db.update(artifacts).set(updates).where(eq(artifacts.id, id));
+  await audit({
+    actorUserId: actor.userId,
+    actorType: "session",
+    action:
+      patch.fileName !== undefined && patch.note === undefined
+        ? "artifact.rename"
+        : "artifact.update",
+    resourceType: "artifact",
+    resourceId: id,
+    ip: actor.ip,
+    userAgent: actor.userAgent,
+    meta,
+  });
+  return (await getArtifact(id)).public;
+}
+
+/** @deprecated use updateArtifact */
 export async function renameArtifact(
   id: string,
   fileName: string,
   actor: { userId: string; ip?: string; userAgent?: string },
 ) {
-  const safe = sanitizeFileName(fileName);
-  if (safe.includes("..")) {
-    throw new AppError(400, "VALIDATION_ERROR", "Invalid file name");
-  }
-  const { row } = await getArtifact(id);
-  const db = getDb();
-  await db
-    .update(artifacts)
-    .set({ fileName: safe, updatedAt: Date.now() })
-    .where(eq(artifacts.id, id));
-  await audit({
-    actorUserId: actor.userId,
-    actorType: "session",
-    action: "artifact.rename",
-    resourceType: "artifact",
-    resourceId: id,
-    ip: actor.ip,
-    userAgent: actor.userAgent,
-    meta: { from: row.fileName, to: safe },
-  });
-  return (await getArtifact(id)).public;
+  return updateArtifact(id, { fileName }, actor);
 }
 
 export async function deleteArtifact(
@@ -153,6 +185,7 @@ export async function promoteFromJob(opts: {
   sourceType?: string | null;
   sourceUrl?: string | null;
   createdBy?: string | null;
+  note?: string | null;
 }): Promise<string> {
   await ensureArtifactsDir();
   const db = getDb();
@@ -168,6 +201,10 @@ export async function promoteFromJob(opts: {
   const dest = artifactDiskPath(storageName);
   await fs.copyFile(opts.tempPath, dest);
   const now = Date.now();
+  const note =
+    opts.note == null || String(opts.note).trim() === ""
+      ? null
+      : String(opts.note).trim().slice(0, 500);
   await db.insert(artifacts).values({
     id,
     fileName: opts.fileName,
@@ -178,6 +215,7 @@ export async function promoteFromJob(opts: {
     sourceType: opts.sourceType ?? null,
     sourceUrl: opts.sourceUrl ?? null,
     sourceJobId: opts.jobId,
+    note,
     createdBy: opts.createdBy ?? null,
     createdAt: now,
     updatedAt: now,

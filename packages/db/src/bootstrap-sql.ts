@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   source_type TEXT,
   source_url TEXT,
   source_job_id TEXT,
+  note TEXT,
   created_by TEXT REFERENCES users(id),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
