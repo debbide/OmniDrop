@@ -21,7 +21,6 @@ export type FsDownloadPayload = {
   targetId: string;
   remotePath: string;
   userId?: string;
-  /** Optional note; defaults to target name when omitted */
   note?: string | null;
 };
 
@@ -70,28 +69,51 @@ export async function processFsDownload(job: Job<FsDownloadPayload>) {
     remotePath: jailed,
     bytesDone: 0,
     bytesTotal: null,
-    progressPct: 0,
+    progressPct: 1,
   });
 
   logger.info({ jobId, targetId, jailed, dest, note }, "FS download start");
 
+  let lastBytes = 0;
+  let lastTotal: number | null = null;
   let lastWrite = 0;
+  const heartbeat = setInterval(() => {
+    void setFsTransfer("download", jobId, {
+      status: "running",
+      bytesDone: lastBytes,
+      bytesTotal: lastTotal,
+      progressPct:
+        lastTotal && lastTotal > 0
+          ? Math.min(
+              99,
+              Math.max(1, Math.round((lastBytes / lastTotal) * 100)),
+            )
+          : lastBytes > 0
+            ? 15
+            : 1,
+    });
+  }, 1000);
+
   try {
     await adapter.download({
       remotePath: jailed,
       localPath: dest,
       onProgress: async ({ bytesDone, bytesTotal }) => {
+        lastBytes = bytesDone;
+        if (bytesTotal > 0) lastTotal = bytesTotal;
         const now = Date.now();
-        if (now - lastWrite < 250) return;
+        if (now - lastWrite < 200) return;
         lastWrite = now;
         await setFsTransfer("download", jobId, {
           status: "running",
           bytesDone,
-          bytesTotal: bytesTotal > 0 ? bytesTotal : null,
+          bytesTotal: bytesTotal > 0 ? bytesTotal : lastTotal,
           progressPct:
             bytesTotal > 0
-              ? Math.min(99, Math.round((bytesDone / bytesTotal) * 100))
-              : 0,
+              ? Math.min(99, Math.max(1, Math.round((bytesDone / bytesTotal) * 100)))
+              : bytesDone > 0
+                ? 15
+                : 1,
         });
       },
     });
@@ -135,5 +157,7 @@ export async function processFsDownload(job: Job<FsDownloadPayload>) {
     });
     logger.error({ jobId, err: message }, "FS download failed");
     throw err;
+  } finally {
+    clearInterval(heartbeat);
   }
 }

@@ -20,11 +20,11 @@ import {
   requireAuth,
   requireScope,
 } from "../middleware/auth.js";
-import { fsDownloadQueue, fsUploadQueue } from "../lib/queues.js";
+import { fsDownloadQueue } from "../lib/queues.js";
 import { redis } from "../lib/redis.js";
 import { newId } from "../lib/id.js";
 import * as remoteFs from "../services/remote-fs-service.js";
-import { getArtifact } from "../services/artifact-service.js";
+import { dispatchArtifact } from "../services/artifact-service.js";
 import { audit } from "../services/audit-service.js";
 
 export const targetFilesRouter = Router({ mergeParams: true });
@@ -119,6 +119,12 @@ targetFilesRouter.get(
   requireScope(ApiScope.TARGETS_READ),
   async (req, res) => {
     try {
+      // Never cache progress — browsers/nginx 304 was freezing the UI at "queued"
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+      res.setHeader("Surrogate-Control", "no-store");
+
       const jobId = paramId(req, "jobId");
       const kind = jobId.startsWith("fsd_")
         ? "download"
@@ -139,10 +145,14 @@ targetFilesRouter.get(
           bytesDone: 0,
           bytesTotal: null,
           progressPct: 0,
+          updatedAt: Date.now(),
         });
         return;
       }
-      res.json(JSON.parse(raw));
+      // Bust ETag sameness if proxy still tries conditional GET
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      body.pollAt = Date.now();
+      res.json(body);
     } catch (err) {
       sendError(res, asAppError(err));
     }
@@ -201,50 +211,49 @@ targetFilesRouter.post(
   },
 );
 
-/** Upload from existing artifact to remote path */
+/**
+ * Upload from artifact library to this target at destPath.
+ * Creates a real job in 任务列表 (progress + cancel via /jobs/:id).
+ */
 targetFilesRouter.post(
   "/upload-artifact",
   requireScope(ApiScope.TARGETS_WRITE),
   async (req, res) => {
     try {
       const body = remoteUploadFromArtifactBodySchema.parse(req.body);
-      const { public: art } = await getArtifact(body.artifactId);
-      const jobId = newId("fsu");
-      await redis.set(
-        `fs-upload:${jobId}`,
-        JSON.stringify({
-          kind: "upload",
-          jobId,
-          status: "queued",
-          targetId: tid(req),
-          artifactId: body.artifactId,
-          fileName: art.fileName,
-          remotePath: body.destPath ?? "",
-          bytesDone: 0,
-          bytesTotal: art.sizeBytes,
-          progressPct: 0,
-          updatedAt: Date.now(),
-        }),
-        "EX",
-        86400,
-      );
-      await fsUploadQueue.add(
-        "fs-upload",
+      const targetId = tid(req);
+      const result = await dispatchArtifact(
+        body.artifactId,
         {
-          jobId,
-          targetId: tid(req),
+          targetIds: [targetId],
+          destPath: body.destPath,
+          options: {
+            overwrite: body.overwrite !== false,
+            retries: 2,
+            destPath: body.destPath,
+          },
+        },
+        req.user!.id,
+        clientMeta(req),
+      );
+      await audit({
+        actorUserId: req.user!.id,
+        actorType: "session",
+        action: "remote.upload_enqueue",
+        resourceType: "target",
+        resourceId: targetId,
+        ...clientMeta(req),
+        meta: {
           artifactId: body.artifactId,
           destPath: body.destPath,
-          overwrite: body.overwrite !== false,
-          userId: req.user!.id,
+          jobId: result.jobId,
         },
-        { jobId: `fs-upload-${jobId}` },
-      );
+      });
       res.status(202).json({
-        jobId,
+        jobId: result.jobId,
         status: "queued",
-        fileName: art.fileName,
-        sizeBytes: art.sizeBytes,
+        // mark as real job so frontend can open /jobs/:id
+        kind: "job",
       });
     } catch (err) {
       sendError(res, asAppError(err));

@@ -203,10 +203,14 @@ export const renameArtifactBodySchema = z
 
 export const dispatchArtifactBodySchema = z.object({
   targetIds: z.array(z.string().min(1)).min(1),
+  /** Optional remote directory (jailed under target remotePath). Defaults to target root. */
+  destPath: z.string().optional(),
   options: z
     .object({
       overwrite: z.boolean().optional().default(true),
       retries: z.number().int().min(0).max(10).optional().default(2),
+      /** Remote upload directory override (same as destPath, stored on job) */
+      destPath: z.string().optional(),
     })
     .optional()
     .default({}),

@@ -256,6 +256,7 @@ export function TargetDetailPage() {
     mutationFn: (values: { artifactId: string }) =>
       api.post<{
         jobId: string;
+        kind?: string;
         fileName?: string;
         sizeBytes?: number;
       }>(`/targets/${id}/files/upload-artifact`, {
@@ -264,11 +265,18 @@ export function TargetDetailPage() {
         overwrite: true,
       }),
     onSuccess: (res) => {
+      setArtifactUploadOpen(false);
+      setPendingUploadArtifactId(null);
+      // Real job in 任务列表 — progress + cancel on job detail page
+      if (res.data.jobId?.startsWith("job_") || res.data.kind === "job") {
+        message.success("已创建上传任务，可在任务详情查看进度/取消");
+        nav(`/jobs/${res.data.jobId}`);
+        return;
+      }
+      // Legacy fs-upload fallback
       const name = res.data.fileName || "文件";
       trackTransfer(res.data.jobId, "upload", name);
       message.success(`开始上传：${name} → ${currentPath}`);
-      setArtifactUploadOpen(false);
-      setPendingUploadArtifactId(null);
     },
     onError: (e: Error) => message.error(e.message),
   });
@@ -690,13 +698,23 @@ function TransferProgressCard(props: {
       (
         await api.get<FsTransfer>(
           `/targets/${props.targetId}/files/transfers/${props.jobId}`,
+          {
+            // bust any intermediate cache / axios etag
+            headers: {
+              "Cache-Control": "no-cache",
+              Pragma: "no-cache",
+            },
+            params: { _t: Date.now() },
+          },
         )
       ).data,
     refetchInterval: (q) => {
       const s = q.state.data?.status;
       if (s === "succeeded" || s === "failed") return false;
-      return 500;
+      return 800;
     },
+    staleTime: 0,
+    gcTime: 0,
   });
 
   useEffect(() => {

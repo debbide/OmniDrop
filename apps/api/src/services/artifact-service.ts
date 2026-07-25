@@ -263,18 +263,28 @@ export async function dispatchArtifact(
 
   const jobId = newId("job");
   const ts = Date.now();
+  const destPath =
+    body.destPath?.trim() ||
+    (body.options as { destPath?: string } | undefined)?.destPath?.trim() ||
+    undefined;
+  const options = {
+    ...(body.options ?? {}),
+    ...(destPath ? { destPath } : {}),
+  };
+  const destLabel = destPath ? ` → ${destPath}` : "";
   await db.insert(jobs).values({
     id: jobId,
-    name: `Redispatch ${row.fileName}`,
+    name: `上传 ${row.fileName}${destLabel}`,
     sourceType: SourceType.ARTIFACT,
     sourceUrl: `artifact://${artifactId}`,
     status: JobStatus.UPLOADING,
     checksumSha256: row.checksumSha256,
+    // Start at 0 so UI progress can move during upload
     bytesTotal: row.sizeBytes,
-    bytesDone: row.sizeBytes,
+    bytesDone: 0,
     fileName: row.fileName,
     artifactId,
-    optionsJson: JSON.stringify(body.options ?? {}),
+    optionsJson: JSON.stringify(options),
     createdBy: userId,
     createdAt: ts,
     startedAt: ts,

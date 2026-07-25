@@ -53,7 +53,7 @@ export async function processFsUpload(job: Job<FsUploadPayload>) {
     remotePath: remoteDir,
     bytesDone: 0,
     bytesTotal: art.sizeBytes,
-    progressPct: 0,
+    progressPct: 1,
   });
 
   logger.info(
@@ -61,7 +61,24 @@ export async function processFsUpload(job: Job<FsUploadPayload>) {
     "FS upload start",
   );
 
+  let lastBytes = 0;
   let lastWrite = 0;
+  // Heartbeat so UI leaves "queued" even if rclone stats parse fails
+  const heartbeat = setInterval(() => {
+    void setFsTransfer("upload", jobId, {
+      status: "running",
+      bytesDone: lastBytes,
+      bytesTotal: art.sizeBytes,
+      progressPct:
+        art.sizeBytes > 0
+          ? Math.min(
+              99,
+              Math.max(1, Math.round((lastBytes / art.sizeBytes) * 100)),
+            )
+          : 1,
+    });
+  }, 1000);
+
   try {
     const result = await adapter.upload({
       localPath,
@@ -70,16 +87,18 @@ export async function processFsUpload(job: Job<FsUploadPayload>) {
       overwrite: overwrite !== false,
       onProgress: async ({ bytesDone, bytesTotal }) => {
         const total = bytesTotal > 0 ? bytesTotal : art.sizeBytes;
+        lastBytes = bytesDone;
         const now = Date.now();
-        // throttle redis writes ~4/s
-        if (now - lastWrite < 250) return;
+        if (now - lastWrite < 200) return;
         lastWrite = now;
         await setFsTransfer("upload", jobId, {
           status: "running",
           bytesDone,
           bytesTotal: total,
           progressPct:
-            total > 0 ? Math.min(99, Math.round((bytesDone / total) * 100)) : 0,
+            total > 0
+              ? Math.min(99, Math.max(1, Math.round((bytesDone / total) * 100)))
+              : 1,
         });
       },
     });
@@ -101,5 +120,7 @@ export async function processFsUpload(job: Job<FsUploadPayload>) {
     });
     logger.error({ jobId, err: message }, "FS upload failed");
     throw err;
+  } finally {
+    clearInterval(heartbeat);
   }
 }

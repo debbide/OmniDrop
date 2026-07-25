@@ -107,7 +107,12 @@ export async function processUpload(
 
   try {
     const jailRoot = getTargetJailRoot(loaded.config);
-    const remoteDir = resolveJailedRemotePath(jailRoot, jailRoot);
+    // Prefer job option destPath (from 目标文件浏览器「上传到此目录」)
+    const destOverride =
+      typeof options.destPath === "string" && options.destPath.trim()
+        ? options.destPath.trim()
+        : jailRoot;
+    const remoteDir = resolveJailedRemotePath(jailRoot, destOverride);
     const adapter = createRemoteFs(
       loaded.target.type,
       loaded.config,
@@ -118,6 +123,10 @@ export async function processUpload(
     // Throttle SQLite writes; still push SSE every tick for live UI
     let lastDbWrite = 0;
     const totalHint = parent.bytesTotal ?? 0;
+    logger.info(
+      { jobId, jobTargetId, remoteDir, file: parent.fileName },
+      "Upload start",
+    );
     const result = await adapter.upload({
       localPath,
       remoteDir,
