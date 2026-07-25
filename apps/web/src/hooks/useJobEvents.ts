@@ -19,6 +19,7 @@ export function useJobEvents(jobId: string | undefined) {
       const invalidate = () => {
         void qc.invalidateQueries({ queryKey: ["job", jobId] });
         void qc.invalidateQueries({ queryKey: ["jobs"] });
+        void qc.invalidateQueries({ queryKey: ["artifacts"] });
       };
 
       for (const ev of [

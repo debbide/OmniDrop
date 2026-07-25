@@ -5,8 +5,9 @@ import { redis } from "./redis.js";
 export const downloadQueue = new Queue(QUEUE_NAMES.DOWNLOAD, {
   connection: redis,
   defaultJobOptions: {
-    attempts: 2,
-    backoff: { type: "exponential", delay: 5000 },
+    // More attempts: partial .part files resume via HTTP Range
+    attempts: 5,
+    backoff: { type: "exponential", delay: 8000 },
     removeOnComplete: 100,
     removeOnFail: 200,
   },
@@ -15,8 +16,9 @@ export const downloadQueue = new Queue(QUEUE_NAMES.DOWNLOAD, {
 export const uploadQueue = new Queue(QUEUE_NAMES.UPLOAD, {
   connection: redis,
   defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: "exponential", delay: 5000 },
+    // Re-upload full file from local library (local source is complete)
+    attempts: 5,
+    backoff: { type: "exponential", delay: 8000 },
     removeOnComplete: 100,
     removeOnFail: 200,
   },

@@ -16,6 +16,14 @@ import { api, type JobDetail } from "../api/client";
 import { StatusTag } from "../components/StatusTag";
 import { useJobEvents } from "../hooks/useJobEvents";
 
+function formatBytes(n?: number | null) {
+  if (n == null || Number.isNaN(n)) return "-";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KiB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(2)} MiB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
+}
+
 export function JobDetailPage() {
   const { id } = useParams();
   const { message } = App.useApp();
@@ -78,16 +86,27 @@ export function JobDetailPage() {
               </Button>
             </Popconfirm>
           )}
-          {(data.status === "failed" || data.status === "partial") && (
+          {(data.status === "failed" ||
+            data.status === "partial" ||
+            data.status === "canceled") && (
             <Button onClick={() => retryMut.mutate()} loading={retryMut.isPending}>
-              重试失败目标
+              {data.targets?.some((t) => t.status === "failed")
+                ? "重试失败上传"
+                : "重试下载（可断点续传）"}
             </Button>
           )}
         </Space>
       </Space>
 
       <div className="page-card" style={{ marginBottom: 16 }}>
-        <Typography.Text>总进度</Typography.Text>
+        <Space style={{ width: "100%", justifyContent: "space-between" }}>
+          <Typography.Text>总进度</Typography.Text>
+          <Typography.Text type="secondary">
+            {formatBytes(data.bytesDone)}
+            {data.bytesTotal != null ? ` / ${formatBytes(data.bytesTotal)}` : ""}
+            {data.progressPct != null ? ` · ${data.progressPct}%` : ""}
+          </Typography.Text>
+        </Space>
         <Progress
           percent={data.progressPct}
           status={
@@ -98,13 +117,16 @@ export function JobDetailPage() {
                 : "active"
           }
         />
+        <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+          下载支持 HTTP Range 断点续传（中断重试会从 .part 继续）；上传失败可从文件管理重试整文件上传。
+        </Typography.Paragraph>
         <Descriptions size="small" column={2} style={{ marginTop: 12 }}>
           <Descriptions.Item label="源类型">{data.sourceType}</Descriptions.Item>
           <Descriptions.Item label="文件名">{data.fileName}</Descriptions.Item>
           {(data as { artifactId?: string }).artifactId && (
-            <Descriptions.Item label="产物">
-              <Link to={`/artifacts`}>
-                {(data as { artifactId?: string }).artifactId}
+            <Descriptions.Item label="文件管理">
+              <Link to="/artifacts">
+                已入库 · {(data as { artifactId?: string }).artifactId}
               </Link>
             </Descriptions.Item>
           )}
@@ -115,9 +137,7 @@ export function JobDetailPage() {
             <span className="mono">{data.checksumSha256 || "-"}</span>
           </Descriptions.Item>
           <Descriptions.Item label="大小">
-            {data.bytesTotal != null
-              ? `${(data.bytesTotal / 1024 / 1024).toFixed(2)} MiB`
-              : "-"}
+            {data.bytesTotal != null ? formatBytes(data.bytesTotal) : "-"}
           </Descriptions.Item>
           <Descriptions.Item label="创建">
             {dayjs(data.createdAt).format("YYYY-MM-DD HH:mm:ss")}
@@ -146,7 +166,15 @@ export function JobDetailPage() {
             },
             {
               title: "进度",
-              render: (_, r) => <Progress percent={r.progressPct} size="small" />,
+              render: (_, r) => (
+                <div style={{ minWidth: 140 }}>
+                  <Progress percent={r.progressPct} size="small" />
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {formatBytes(r.bytesDone)}
+                    {r.bytesTotal != null ? ` / ${formatBytes(r.bytesTotal)}` : ""}
+                  </Typography.Text>
+                </div>
+              ),
             },
             {
               title: "远端路径",

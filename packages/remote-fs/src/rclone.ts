@@ -199,23 +199,39 @@ export function createRcloneRemoteFs(
           "--stats",
           "1s",
           "--stats-one-line",
+          // Network flake recovery (whole-file retry with local complete source)
           "--retries",
-          "3",
-          "--low-level-retries",
           "5",
-        ];
+          "--retries-sleep",
+          "5s",
+          "--low-level-retries",
+          "10",
+          ];
         if (params.overwrite === false) args.push("--ignore-existing");
-        await run(bin, args, params.signal, (line) => {
-          const m = line.match(
-            /Transferred:\s+([\d.]+)\s*([KMGTP]?i?B)\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)/i,
-          );
-          if (m && params.onProgress) {
-            void params.onProgress({
-              bytesDone: parseSize(Number(m[1]), m[2]!),
-              bytesTotal: parseSize(Number(m[3]), m[4]!),
-            });
-          }
-        });
+        await run(
+          bin,
+          args,
+          params.signal,
+          (line) => {
+            // Transferred: 1.234 MiB / 10 MiB, 12%, ...
+            const m = line.match(
+              /Transferred:\s+([\d.]+)\s*([KMGTP]?i?B)\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)(?:,\s*(\d+)%)?/i,
+            );
+            if (m && params.onProgress) {
+              const done = parseSize(Number(m[1]), m[2]!);
+              let total = parseSize(Number(m[3]), m[4]!);
+              if ((!total || total < done) && m[5]) {
+                const pct = Number(m[5]);
+                if (pct > 0) total = Math.round((done * 100) / pct);
+              }
+              void params.onProgress({
+                bytesDone: done,
+                bytesTotal: total || done,
+              });
+            }
+          },
+          0, // 0 = no wall-clock timeout for large uploads (cancel via signal)
+        );
         return { remoteFinalPath: finalPath };
       } catch (err) {
         throw classifyRemoteError(err);
@@ -444,17 +460,21 @@ function run(
     });
     let stderr = "";
     let settled = false;
-    const timer = setTimeout(() => {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        /* */
-      }
-      if (!settled) {
-        settled = true;
-        reject(new Error(`rclone timed out after ${timeoutMs}ms`));
-      }
-    }, timeoutMs);
+    // timeoutMs <= 0 means no wall-clock timeout (for large transfers)
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            try {
+              child.kill("SIGTERM");
+            } catch {
+              /* */
+            }
+            if (!settled) {
+              settled = true;
+              reject(new Error(`rclone timed out after ${timeoutMs}ms`));
+            }
+          }, timeoutMs)
+        : null;
 
     const onData = (buf: Buffer) => {
       const text = buf.toString("utf8");
@@ -472,7 +492,7 @@ function run(
     };
     signal?.addEventListener("abort", onAbort);
     child.on("error", (err) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       if (settled) return;
       settled = true;
@@ -483,7 +503,7 @@ function run(
       );
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       if (settled) return;
       settled = true;

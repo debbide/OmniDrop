@@ -110,7 +110,7 @@ export function ArtifactsPage() {
         options: { overwrite: true },
       }),
     onSuccess: (res) => {
-      message.success("已创建投递任务");
+      message.success("已开始上传到目标");
       setDispatchArt(null);
       nav(`/jobs/${res.data.jobId}`);
     },
@@ -125,13 +125,19 @@ export function ArtifactsPage() {
         style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }}
       >
         <div>
+          <div>
           <Typography.Title level={3} style={{ margin: 0 }}>
-            产物库
+            文件管理
           </Typography.Title>
           <Typography.Text type="secondary">
-            共 {data?.total ?? 0} 个 · {formatBytes(data?.totalBytes ?? 0)}
+            本站存储（下载后的文件）。共 {data?.total ?? 0} 个 ·{" "}
+            {formatBytes(data?.totalBytes ?? 0)}
+            。在此重命名 / 删除 / 下载 / 分享；需要发到服务器时点「上传到目标」。
           </Typography.Text>
         </div>
+        <Button type="primary" onClick={() => nav("/jobs/new")}>
+          从网址下载
+        </Button>
       </Space>
 
       <div className="page-card">
@@ -205,7 +211,7 @@ export function ArtifactsPage() {
                       dispatchForm.resetFields();
                     }}
                   >
-                    再投递
+                    上传到目标
                   </Button>
                   <Popconfirm
                     title="删除产物及关联分享？"
@@ -303,20 +309,29 @@ export function ArtifactsPage() {
       </Drawer>
 
       <Modal
-        title={`再投递 · ${dispatchArt?.fileName ?? ""}`}
+        title={`上传到目标 · ${dispatchArt?.fileName ?? ""}`}
         open={!!dispatchArt}
         onCancel={() => setDispatchArt(null)}
         onOk={() => dispatchForm.submit()}
         confirmLoading={dispatchMut.isPending}
+        okText="开始上传"
       >
+        <Typography.Paragraph type="secondary">
+          将产物库中的文件上传到已启用的目标服务器（SFTP / FTP / WebDAV / 翼龙）。
+        </Typography.Paragraph>
         <Form form={dispatchForm} layout="vertical" onFinish={(v) => dispatchMut.mutate(v)}>
           <Form.Item
             name="targetIds"
-            label="目标"
-            rules={[{ required: true, message: "请选择目标" }]}
+            label="目标服务器"
+            rules={[{ required: true, message: "请选择至少一个目标" }]}
           >
             <Select
               mode="multiple"
+              placeholder={
+                enabledTargets.length
+                  ? "选择目标"
+                  : "暂无已启用目标，请先到目标管理添加"
+              }
               options={enabledTargets.map((t) => ({
                 value: t.id,
                 label: `${t.name} (${t.type})`,

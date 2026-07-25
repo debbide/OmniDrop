@@ -134,7 +134,8 @@ export const createJobBodySchema = z.object({
       assetName: z.string().optional(),
     })
     .optional(),
-  targetIds: z.array(z.string().min(1)).min(1),
+  /** Optional for HTTP/GitHub: empty = download into library only, no upload */
+  targetIds: z.array(z.string().min(1)).optional().default([]),
   options: z
     .object({
       overwrite: z.boolean().optional().default(true),
@@ -154,6 +155,13 @@ export const createJobBodySchema = z.object({
         code: z.ZodIssueCode.custom,
         message: "artifactId is required for artifact source",
         path: ["artifactId"],
+      });
+    }
+    if (!val.targetIds?.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "targetIds is required when uploading from artifact library",
+        path: ["targetIds"],
       });
     }
   } else if (!val.sourceUrl) {

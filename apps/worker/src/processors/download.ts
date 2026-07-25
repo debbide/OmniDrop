@@ -27,11 +27,18 @@ import { workerConfig } from "../config.js";
 import { logger } from "../logger.js";
 import { promoteJobArtifact } from "../lib/artifacts.js";
 
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KiB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(2)} MiB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
+}
+
 const uploadQueue = new Queue(QUEUE_NAMES.UPLOAD, {
   connection: redis,
   defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: "exponential", delay: 5000 },
+    attempts: 5,
+    backoff: { type: "exponential", delay: 8000 },
     removeOnComplete: 100,
     removeOnFail: 200,
   },
@@ -122,7 +129,8 @@ export async function processDownload(job: Job<{ jobId: string }>) {
       fileName,
       expectedSha256: options.expectedSha256,
       headers,
-      onProgress: async ({ bytesDone, bytesTotal }) => {
+      resume: true,
+      onProgress: async ({ bytesDone, bytesTotal, resumedFrom, phase }) => {
         await db
           .update(jobs)
           .set({
@@ -135,20 +143,43 @@ export async function processDownload(job: Job<{ jobId: string }>) {
             bytesTotal && bytesTotal > 0
               ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
               : 0;
+          const detail =
+            phase === "hashing"
+              ? "校验 SHA256…"
+              : resumedFrom && resumedFrom > 0
+                ? `断点续传自 ${formatBytes(resumedFrom)}`
+                : null;
           await db
             .update(jobSteps)
-            .set({ progressPct: pct, updatedAt: Date.now() })
+            .set({
+              progressPct: pct,
+              updatedAt: Date.now(),
+              ...(detail ? { detail } : {}),
+            })
             .where(eq(jobSteps.id, downloadStep.id));
         }
         await setProgressFields(jobId, {
           bytesDone,
           bytesTotal: bytesTotal ?? 0,
-          phase: "download",
+          phase: phase ?? "download",
+          resumedFrom: resumedFrom ?? 0,
         });
         await publishJobEvent(jobId, "step.updated", {
           step: StepName.DOWNLOAD,
           bytesDone,
           bytesTotal,
+          resumedFrom: resumedFrom ?? 0,
+          phase: phase ?? "downloading",
+        });
+        await publishJobEvent(jobId, "job.updated", {
+          id: jobId,
+          status: JobStatus.DOWNLOADING,
+          bytesDone,
+          bytesTotal,
+          progressPct:
+            bytesTotal && bytesTotal > 0
+              ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
+              : 0,
         });
       },
     });
@@ -188,7 +219,9 @@ export async function processDownload(job: Job<{ jobId: string }>) {
         .set({
           status: StepStatus.SUCCEEDED,
           progressPct: 100,
-          detail: `sha256=${result.checksumSha256}; artifact=${artifactId}`,
+          detail: `sha256=${result.checksumSha256}; artifact=${artifactId}${
+            result.resumed ? "; resumed=1" : ""
+          }`,
           updatedAt: doneAt,
         })
         .where(eq(jobSteps.id, downloadStep.id));
@@ -205,6 +238,27 @@ export async function processDownload(job: Job<{ jobId: string }>) {
     const jts = (
       await db.select().from(jobTargets).where(eq(jobTargets.jobId, jobId)).all()
     ).filter((jt) => jt.status === JobTargetStatus.PENDING);
+
+    // Download-only: no targets → finish as succeeded (file is in library)
+    if (!jts.length) {
+      await db
+        .update(jobs)
+        .set({
+          status: JobStatus.SUCCEEDED,
+          finishedAt: Date.now(),
+        })
+        .where(eq(jobs.id, jobId));
+      await publishJobEvent(jobId, "job.finished", {
+        id: jobId,
+        status: JobStatus.SUCCEEDED,
+        artifactId,
+      });
+      logger.info(
+        { jobId, file: result.fileName, bytes: result.bytesTotal, artifactId },
+        "Download-only complete (library)",
+      );
+      return;
+    }
 
     await db
       .update(jobs)
@@ -236,7 +290,7 @@ export async function processDownload(job: Job<{ jobId: string }>) {
 
     logger.info(
       { jobId, file: result.fileName, bytes: result.bytesTotal },
-      "Download complete",
+      "Download complete, uploading",
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

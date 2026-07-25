@@ -37,6 +37,7 @@ export type JobBrief = {
   bytesTotal: number | null;
   bytesDone: number;
   fileName: string | null;
+  artifactId?: string | null;
   errorMessage: string | null;
   createdAt: number;
   startedAt: number | null;

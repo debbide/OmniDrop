@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -8,17 +8,27 @@ import axios from "axios";
 import { fileNameFromUrl, sanitizeFileName } from "@omnidrop/shared";
 import { workerConfig } from "../config.js";
 import { isCanceled } from "../lib/progress.js";
+import { logger } from "../logger.js";
 
 export type DownloadResult = {
   filePath: string;
   fileName: string;
   bytesTotal: number;
   checksumSha256: string;
+  resumed: boolean;
 };
 
 export type DownloadProgress = {
   bytesDone: number;
   bytesTotal: number | null;
+  resumedFrom?: number;
+  phase?: "downloading" | "hashing";
+};
+
+type PartMeta = {
+  url: string;
+  expectedTotal: number | null;
+  etag: string | null;
 };
 
 export async function resolveGithubAssetUrl(opts: {
@@ -27,9 +37,7 @@ export async function resolveGithubAssetUrl(opts: {
   assetName?: string;
   token?: string;
 }): Promise<{ url: string; fileName: string }> {
-  const m = opts.repoUrl.match(
-    /github\.com\/([^/]+)\/([^/#?]+)/i,
-  );
+  const m = opts.repoUrl.match(/github\.com\/([^/]+)\/([^/#?]+)/i);
   if (!m) throw new Error("Invalid GitHub repository URL");
   const owner = m[1];
   const repo = m[2]!.replace(/\.git$/, "");
@@ -61,9 +69,36 @@ export async function resolveGithubAssetUrl(opts: {
     asset = found;
   }
 
-  return { url: asset.browser_download_url, fileName: sanitizeFileName(asset.name) };
+  return {
+    url: asset.browser_download_url,
+    fileName: sanitizeFileName(asset.name),
+  };
 }
 
+async function sha256File(filePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  await new Promise<void>((resolve, reject) => {
+    const s = createReadStream(filePath);
+    s.on("data", (c) => hash.update(c));
+    s.on("error", reject);
+    s.on("end", () => resolve());
+  });
+  return hash.digest("hex");
+}
+
+async function readPartMeta(metaPath: string): Promise<PartMeta | null> {
+  try {
+    const raw = await fs.readFile(metaPath, "utf8");
+    return JSON.parse(raw) as PartMeta;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stream download with HTTP Range resume.
+ * Partial data is kept in `file.part` (+ `.part.json` meta) until complete.
+ */
 export async function streamDownloadToFile(opts: {
   jobId: string;
   url: string;
@@ -71,35 +106,164 @@ export async function streamDownloadToFile(opts: {
   fileName?: string;
   expectedSha256?: string | null;
   headers?: Record<string, string>;
+  resume?: boolean;
   onProgress?: (p: DownloadProgress) => void | Promise<void>;
 }): Promise<DownloadResult> {
   await fs.mkdir(opts.destDir, { recursive: true });
   const fileName = opts.fileName ?? fileNameFromUrl(opts.url);
   const filePath = path.join(opts.destDir, fileName);
+  const partPath = `${filePath}.part`;
+  const metaPath = `${filePath}.part.json`;
+  const resumeEnabled = opts.resume !== false;
 
-  const response = await axios.get(opts.url, {
-    responseType: "stream",
-    timeout: 0,
-    maxRedirects: 5,
-    headers: {
-      "User-Agent": "OmniDrop",
-      ...(opts.headers ?? {}),
-    },
-    validateStatus: (s) => s >= 200 && s < 400,
-  });
+  let existing = 0;
+  if (resumeEnabled) {
+    try {
+      const st = await fs.stat(partPath);
+      existing = st.size;
+    } catch {
+      existing = 0;
+    }
+  } else {
+    await fs.unlink(partPath).catch(() => undefined);
+    await fs.unlink(metaPath).catch(() => undefined);
+  }
 
-  if (response.status >= 400) {
+  // If final file already complete (edge case), return it
+  try {
+    const finalSt = await fs.stat(filePath);
+    if (finalSt.size > 0 && existing === 0) {
+      const checksumSha256 = await sha256File(filePath);
+      if (
+        !opts.expectedSha256 ||
+        opts.expectedSha256.toLowerCase() === checksumSha256.toLowerCase()
+      ) {
+        return {
+          filePath,
+          fileName,
+          bytesTotal: finalSt.size,
+          checksumSha256,
+          resumed: false,
+        };
+      }
+    }
+  } catch {
+    /* no final yet */
+  }
+
+  const baseHeaders: Record<string, string> = {
+    "User-Agent": "OmniDrop",
+    ...(opts.headers ?? {}),
+  };
+
+  let resumed = false;
+  let bytesDone = existing;
+  let bytesTotal: number | null = null;
+
+  if (existing > 0) {
+    const meta = await readPartMeta(metaPath);
+    if (meta && meta.url !== opts.url) {
+      logger.info({ jobId: opts.jobId }, "Part meta URL mismatch, restart download");
+      await fs.unlink(partPath).catch(() => undefined);
+      await fs.unlink(metaPath).catch(() => undefined);
+      existing = 0;
+      bytesDone = 0;
+    } else {
+      baseHeaders.Range = `bytes=${existing}-`;
+      resumed = true;
+      if (meta?.expectedTotal) bytesTotal = meta.expectedTotal;
+    }
+  }
+
+  let response;
+  try {
+    response = await axios.get(opts.url, {
+      responseType: "stream",
+      timeout: 0,
+      maxRedirects: 5,
+      headers: baseHeaders,
+      validateStatus: (s) => s === 200 || s === 206 || (s >= 300 && s < 400),
+    });
+  } catch (err) {
+    // keep .part for next retry
+    throw err;
+  }
+
+  // Follow is handled by axios; if server ignores Range and returns 200 with full body
+  if (response.status === 200 && existing > 0) {
+    logger.warn(
+      { jobId: opts.jobId, existing },
+      "Server ignored Range (200); restarting full download",
+    );
+    await fs.unlink(partPath).catch(() => undefined);
+    await fs.unlink(metaPath).catch(() => undefined);
+    existing = 0;
+    bytesDone = 0;
+    resumed = false;
+  }
+
+  if (response.status !== 200 && response.status !== 206) {
+    // destroy stream body
+    response.data?.destroy?.();
     throw new Error(`Download failed with HTTP ${response.status}`);
   }
 
-  const contentLength = response.headers["content-length"]
-    ? Number(response.headers["content-length"])
-    : null;
+  if (response.status === 206) {
+    resumed = true;
+    const cr = String(response.headers["content-range"] ?? "");
+    // bytes start-end/total
+    const m = cr.match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
+    if (m && m[3] !== "*") {
+      bytesTotal = Number(m[3]);
+    } else {
+      const cl = response.headers["content-length"]
+        ? Number(response.headers["content-length"])
+        : null;
+      if (cl != null) bytesTotal = existing + cl;
+    }
+    // If server started at wrong offset, restart
+    if (m && Number(m[1]) !== existing) {
+      response.data?.destroy?.();
+      throw new Error(
+        `Range mismatch: requested ${existing}, server started at ${m[1]}`,
+      );
+    }
+  } else {
+    // 200 full
+    const cl = response.headers["content-length"]
+      ? Number(response.headers["content-length"])
+      : null;
+    bytesTotal = cl;
+    existing = 0;
+    bytesDone = 0;
+  }
 
-  const hash = createHash("sha256");
-  let bytesDone = 0;
+  const etag = (response.headers.etag as string | undefined) ?? null;
+  await fs.writeFile(
+    metaPath,
+    JSON.stringify({
+      url: opts.url,
+      expectedTotal: bytesTotal,
+      etag,
+    } satisfies PartMeta),
+    "utf8",
+  );
+
+  if (opts.onProgress) {
+    await opts.onProgress({
+      bytesDone,
+      bytesTotal,
+      resumedFrom: resumed ? existing : 0,
+      phase: "downloading",
+    });
+  }
+
+  const append = existing > 0 && response.status === 206;
+  const writeStream = createWriteStream(partPath, {
+    flags: append ? "a" : "w",
+  });
+
   let lastEmit = 0;
-
   const transform = new Transform({
     transform(chunk, _enc, cb) {
       void (async () => {
@@ -109,11 +273,15 @@ export async function streamDownloadToFile(opts: {
             return;
           }
           bytesDone += chunk.length;
-          hash.update(chunk);
           const now = Date.now();
-          if (opts.onProgress && now - lastEmit > 500) {
+          if (opts.onProgress && now - lastEmit > 400) {
             lastEmit = now;
-            await opts.onProgress({ bytesDone, bytesTotal: contentLength });
+            await opts.onProgress({
+              bytesDone,
+              bytesTotal,
+              resumedFrom: resumed ? existing : 0,
+              phase: "downloading",
+            });
           }
           cb(null, chunk);
         } catch (err) {
@@ -123,34 +291,79 @@ export async function streamDownloadToFile(opts: {
     },
   });
 
-  const writeStream = createWriteStream(filePath);
   try {
     await pipeline(response.data, transform, writeStream);
   } catch (err) {
-    await fs.unlink(filePath).catch(() => undefined);
+    // Keep .part for resume unless canceled
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.toLowerCase().includes("canceled")) {
+      // user cancel: leave part so manual retry can resume, or clean?
+      // keep part for resume on retry
+    }
     throw err;
   }
 
-  if (opts.onProgress) {
-    await opts.onProgress({ bytesDone, bytesTotal: contentLength ?? bytesDone });
+  // Verify size if known
+  const st = await fs.stat(partPath);
+  if (bytesTotal != null && st.size !== bytesTotal) {
+    // incomplete — keep part for resume
+    throw new Error(
+      `Download incomplete: got ${st.size} bytes, expected ${bytesTotal}`,
+    );
   }
 
-  const checksumSha256 = hash.digest("hex");
+  if (opts.onProgress) {
+    await opts.onProgress({
+      bytesDone: st.size,
+      bytesTotal: bytesTotal ?? st.size,
+      resumedFrom: resumed ? existing : 0,
+      phase: "hashing",
+    });
+  }
+
+  const checksumSha256 = await sha256File(partPath);
   if (
     opts.expectedSha256 &&
     opts.expectedSha256.toLowerCase() !== checksumSha256.toLowerCase()
   ) {
-    await fs.unlink(filePath).catch(() => undefined);
+    await fs.unlink(partPath).catch(() => undefined);
+    await fs.unlink(metaPath).catch(() => undefined);
     throw new Error(
       `Checksum mismatch: expected ${opts.expectedSha256}, got ${checksumSha256}`,
     );
   }
 
+  // Atomic-ish promote part → final
+  await fs.unlink(filePath).catch(() => undefined);
+  await fs.rename(partPath, filePath);
+  await fs.unlink(metaPath).catch(() => undefined);
+
+  if (opts.onProgress) {
+    await opts.onProgress({
+      bytesDone: st.size,
+      bytesTotal: st.size,
+      resumedFrom: resumed ? existing : 0,
+      phase: "downloading",
+    });
+  }
+
+  logger.info(
+    {
+      jobId: opts.jobId,
+      fileName,
+      size: st.size,
+      resumed,
+      from: resumed ? existing : 0,
+    },
+    "Download finished",
+  );
+
   return {
     filePath,
     fileName,
-    bytesTotal: bytesDone,
+    bytesTotal: st.size,
     checksumSha256,
+    resumed,
   };
 }
 

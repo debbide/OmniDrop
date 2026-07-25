@@ -154,29 +154,41 @@ function serializeJobBrief(job: typeof jobs.$inferSelect) {
 
 export async function createJob(body: CreateJobBody, userId: string) {
   const db = getDb();
-  const targetRows = await db
-    .select()
-    .from(targets)
-    .where(inArray(targets.id, body.targetIds))
-    .all();
+  const targetIds = body.targetIds ?? [];
+  let targetRows: (typeof targets.$inferSelect)[] = [];
 
-  if (targetRows.length !== body.targetIds.length) {
-    throw new AppError(400, "VALIDATION_ERROR", "One or more targets not found");
-  }
-  const disabled = targetRows.filter((t) => !t.enabled);
-  if (disabled.length) {
-    throw new AppError(
-      400,
-      "VALIDATION_ERROR",
-      `Disabled targets: ${disabled.map((t) => t.name).join(", ")}`,
-    );
+  if (targetIds.length > 0) {
+    targetRows = await db
+      .select()
+      .from(targets)
+      .where(inArray(targets.id, targetIds))
+      .all();
+
+    if (targetRows.length !== targetIds.length) {
+      throw new AppError(400, "VALIDATION_ERROR", "One or more targets not found");
+    }
+    const disabled = targetRows.filter((t) => !t.enabled);
+    if (disabled.length) {
+      throw new AppError(
+        400,
+        "VALIDATION_ERROR",
+        `Disabled targets: ${disabled.map((t) => t.name).join(", ")}`,
+      );
+    }
   }
 
   const jobId = newId("job");
   const ts = now();
 
-  // Artifact re-dispatch path: skip download
+  // Upload from library: skip download, enqueue uploads only
   if (body.sourceType === SourceType.ARTIFACT) {
+    if (!targetRows.length) {
+      throw new AppError(
+        400,
+        "VALIDATION_ERROR",
+        "Select at least one target to upload from the library",
+      );
+    }
     const { row: art } = await getArtifact(body.artifactId!);
     await db.insert(jobs).values({
       id: jobId,
@@ -223,6 +235,7 @@ export async function createJob(body: CreateJobBody, userId: string) {
     return getJobDetail(jobId);
   }
 
+  // Download into library (optionally also upload if targetIds provided)
   const fileName =
     body.sourceType === "github_release" && body.sourceMeta?.assetName
       ? body.sourceMeta.assetName
@@ -311,11 +324,63 @@ export async function cancelJob(id: string) {
   return getJobDetail(id);
 }
 
+/** Retry failed download (Range resume from .part) when no targets / download failed */
+export async function retryDownload(id: string) {
+  const db = getDb();
+  const job = await db.select().from(jobs).where(eq(jobs.id, id)).get();
+  if (!job) throw new AppError(404, "NOT_FOUND", "Job not found");
+  if (job.sourceType === "artifact") {
+    throw new AppError(409, "CONFLICT", "Artifact upload jobs have no download step");
+  }
+  if (job.status !== JobStatus.FAILED && job.status !== JobStatus.CANCELED) {
+    throw new AppError(409, "CONFLICT", "Only failed/canceled downloads can be retried");
+  }
+  // clear cancel flag so resume can run
+  await redis.del(REDIS_KEYS.jobCancel(id));
+  await db
+    .update(jobs)
+    .set({
+      status: JobStatus.QUEUED,
+      errorMessage: null,
+      finishedAt: null,
+    })
+    .where(eq(jobs.id, id));
+
+  const steps = await db
+    .select()
+    .from(jobSteps)
+    .where(eq(jobSteps.jobId, id))
+    .all();
+  const dl = steps.find((s) => s.step === StepName.DOWNLOAD);
+  if (dl) {
+    await db
+      .update(jobSteps)
+      .set({
+        status: StepStatus.PENDING,
+        progressPct: 0,
+        detail: "resume pending",
+        updatedAt: Date.now(),
+      })
+      .where(eq(jobSteps.id, dl.id));
+  }
+
+  await downloadQueue.add(
+    "download",
+    { jobId: id },
+    { jobId: `download-${id}-retry-${Date.now()}` },
+  );
+  return getJobDetail(id);
+}
+
 export async function retryFailedTargets(id: string) {
   const db = getDb();
   const job = await db.select().from(jobs).where(eq(jobs.id, id)).get();
   if (!job) throw new AppError(404, "NOT_FOUND", "Job not found");
   if (!job.artifactId && (!job.tempPath || !job.checksumSha256)) {
+    // If download failed mid-way, offer download resume instead
+    if (job.status === JobStatus.FAILED || job.status === JobStatus.CANCELED) {
+      return retryDownload(id);
+    }
     throw new AppError(
       409,
       "CONFLICT",

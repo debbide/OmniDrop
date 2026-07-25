@@ -51,10 +51,10 @@ export function AppLayout() {
           onClick={({ key }) => nav(key)}
           items={[
             { key: "/", icon: <DashboardOutlined />, label: "总览" },
-            { key: "/artifacts", icon: <DatabaseOutlined />, label: "产物库" },
+            { key: "/artifacts", icon: <DatabaseOutlined />, label: "文件管理" },
             { key: "/targets", icon: <ClusterOutlined />, label: "目标管理" },
             { key: "/jobs", icon: <UnorderedListOutlined />, label: "任务列表" },
-            { key: "/jobs/new", icon: <PlusOutlined />, label: "新建投递" },
+            { key: "/jobs/new", icon: <PlusOutlined />, label: "从网址下载" },
             { key: "/settings", icon: <SettingOutlined />, label: "设置" },
           ]}
         />
