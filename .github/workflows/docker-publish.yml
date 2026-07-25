@@ -1,0 +1,95 @@
+name: Docker multi-arch publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # lowercase owner/repo for GHCR
+  IMAGE_PREFIX: ghcr.io/debbide/omnidrop
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            dockerfile: docker/Dockerfile.api
+            image_suffix: api
+          - name: worker
+            dockerfile: docker/Dockerfile.worker
+            image_suffix: worker
+          - name: web
+            dockerfile: docker/Dockerfile.web
+            image_suffix: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.image_suffix }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # BuildKit provides TARGETARCH automatically for each platform
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          provenance: false
+
+  summary:
+    needs: build-and-push
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print image names
+        run: |
+          echo "Images (multi-arch amd64+arm64):"
+          echo "  ghcr.io/debbide/omnidrop-api:latest"
+          echo "  ghcr.io/debbide/omnidrop-worker:latest"
+          echo "  ghcr.io/debbide/omnidrop-web:latest"
+          echo ""
+          echo "Deploy:"
+          echo "  docker compose pull && docker compose up -d"

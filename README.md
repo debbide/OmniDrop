@@ -25,25 +25,31 @@
 
 ## 快速开始（Docker）
 
+镜像由 GitHub Actions 构建，支持 **linux/amd64** 与 **linux/arm64**（GHCR）。
+
+### 生产：拉取多架构镜像
+
 ```bash
-# 1. 生成密钥
-node -e "console.log('OMNIDROP_DATA_KEY=' + require('crypto').randomBytes(32).toString('base64'))"
-node -e "console.log('SESSION_SECRET=' + require('crypto').randomBytes(32).toString('hex'))"
-
-# 2. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入上面两个密钥
+# 填入 OMNIDROP_DATA_KEY / SESSION_SECRET / APP_BASE_URL
 
-# 3. 启动
-docker compose up -d --build
-
-# 4. 打开面板
+docker compose pull
+docker compose up -d
 # http://localhost:8080
+```
+
+### 本地：从源码构建
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 首次访问会引导创建管理员账号（密码 ≥ 10 位）。
 
 **重要：** 请备份 `OMNIDROP_DATA_KEY` 与 SQLite 数据卷；丢失密钥将无法解密已有目标凭据。
+
+更完整的 VPS 步骤见 [deploy/README.md](deploy/README.md)。
 
 ## 本地开发
 

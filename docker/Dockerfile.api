@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM node:20-bookworm-slim AS base
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
@@ -24,12 +25,21 @@ RUN pnpm --filter @omnidrop/shared build \
 FROM node:20-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+# TARGETARCH is set automatically by Buildx per platform (amd64/arm64)
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
-  && curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip \
-  && unzip -j /tmp/rclone.zip -d /tmp/rclone \
-  && mv /tmp/rclone/rclone /usr/local/bin/rclone \
-  && chmod +x /usr/local/bin/rclone \
-  && rm -rf /tmp/rclone /tmp/rclone.zip /var/lib/apt/lists/*
-COPY --from=build /app /app
+  && rm -rf /var/lib/apt/lists/*
+COPY docker/install-rclone.sh /tmp/install-rclone.sh
+RUN chmod +x /tmp/install-rclone.sh \
+  && TARGETARCH=${TARGETARCH} /tmp/install-rclone.sh \
+  && rm /tmp/install-rclone.sh
+
+COPY --from=build /app/package.json /app/pnpm-workspace.yaml /app/
+COPY --from=build /app/node_modules /app/node_modules
+COPY --from=build /app/packages /app/packages
+COPY --from=build /app/apps/api /app/apps/api
+
 EXPOSE 3000
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+  CMD curl -fsS http://127.0.0.1:3000/api/v1/health || exit 1
 CMD ["node", "apps/api/dist/index.js"]

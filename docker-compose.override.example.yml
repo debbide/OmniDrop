@@ -1,0 +1,7 @@
+# Optional local overrides (copy to docker-compose.override.yml — auto-loaded by Compose).
+# Example: expose API for debugging
+#
+# services:
+#   api:
+#     ports:
+#       - "3000:3000"

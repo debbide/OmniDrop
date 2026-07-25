@@ -1,0 +1,25 @@
+# Override: build images from local source (multi-arch friendly Dockerfiles).
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+
+services:
+  api:
+    image: omnidrop-api:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+      args:
+        TARGETARCH: ${TARGETARCH:-}
+
+  worker:
+    image: omnidrop-worker:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+      args:
+        TARGETARCH: ${TARGETARCH:-}
+
+  web:
+    image: omnidrop-web:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
