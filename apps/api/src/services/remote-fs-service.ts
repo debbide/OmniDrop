@@ -83,6 +83,12 @@ export async function listRemoteFiles(targetId: string, userPath?: string) {
     });
     return { root: jailRoot, path, entries: safe, truncated: entries.length >= 2000 };
   } catch (err) {
+    // Log raw error for docker logs diagnosis (502 with short body)
+    console.error(
+      "[remote-fs list]",
+      targetId,
+      err instanceof Error ? err.message : err,
+    );
     if (err instanceof AppError) throw err;
     mapFsError(err);
   }

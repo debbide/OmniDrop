@@ -9,11 +9,17 @@ export const api = axios.create({
 api.interceptors.response.use(
   (r) => r,
   (error) => {
+    const data = error.response?.data;
     const message =
-      error.response?.data?.error?.message ||
+      data?.error?.message ||
+      data?.message ||
+      (typeof data === "string" ? data : null) ||
       error.message ||
       "Request failed";
-    return Promise.reject(new Error(message));
+    const err = new Error(message) as Error & { status?: number; code?: string };
+    err.status = error.response?.status;
+    err.code = data?.error?.code;
+    return Promise.reject(err);
   },
 );
 

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Alert,
   App,
   Breadcrumb,
   Button,
@@ -285,9 +286,24 @@ export function TargetDetailPage() {
         </Space>
 
         {error && (
-          <Typography.Text type="danger">
-            {(error as Error).message}
-          </Typography.Text>
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="无法列出远端目录"
+            description={
+              <div>
+                <div>{(error as Error).message}</div>
+                <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+                  请检查：① 主机/端口/账号密码 ②「远端路径」是否为该 SFTP 用户真实目录（可先试{" "}
+                  <code>/</code>）③ 服务器防火墙是否允许本机出站 ④ 目标详情点「测试」看连通性。
+                  容器内可执行：
+                  <code> docker compose logs omnidrop | tail </code>
+                  查看 [remote-fs list] 详细错误。
+                </Typography.Paragraph>
+              </div>
+            }
+          />
         )}
         {data?.truncated && (
           <Typography.Text type="warning">

@@ -61,19 +61,47 @@ export function createRcloneRemoteFs(
       const confDir = await writeConf(backend, bin);
       try {
         const remote = toRemoteSpec(dirPath);
-        const out = await runCapture(
-          bin,
-          [
-            "lsjson",
-            remote,
-            "--config",
-            confPath(confDir),
-            "--max-depth",
-            "1",
-            "--no-mimetype",
-          ],
-          LIST_TIMEOUT_MS,
-        );
+        let out: string;
+        try {
+          out = await runCapture(
+            bin,
+            [
+              "lsjson",
+              remote,
+              "--config",
+              confPath(confDir),
+              "--max-depth",
+              "1",
+              "--no-mimetype",
+            ],
+            LIST_TIMEOUT_MS,
+          );
+        } catch (firstErr) {
+          // Fallback: some SFTP chroots reject absolute remote:/x — try home-relative
+          const n = normalizeRemotePath(dirPath);
+          if (n !== "/" && n.startsWith("/")) {
+            const rel = `remote:${n.replace(/^\//, "")}`;
+            try {
+              out = await runCapture(
+                bin,
+                [
+                  "lsjson",
+                  rel,
+                  "--config",
+                  confPath(confDir),
+                  "--max-depth",
+                  "1",
+                  "--no-mimetype",
+                ],
+                LIST_TIMEOUT_MS,
+              );
+            } catch {
+              throw firstErr;
+            }
+          } else {
+            throw firstErr;
+          }
+        }
         const parsed = JSON.parse(out || "[]") as Array<{
           Path?: string;
           Name?: string;
@@ -312,10 +340,18 @@ function confPath(dir: string) {
   return path.join(dir, "rclone.conf");
 }
 
+/**
+ * rclone SFTP/FTP path rules:
+ * - remote:foo     → relative to login home
+ * - remote:/foo    → absolute from server root
+ * We always store unix paths with leading / in DB/UI, so keep the slash
+ * for absolute paths. Only bare "remote:" for jail root "/".
+ */
 function toRemoteSpec(remotePath: string): string {
   const n = normalizeRemotePath(remotePath);
   if (n === "/") return "remote:";
-  return `remote:${n.replace(/^\//, "")}`;
+  // Keep leading slash → absolute on server (critical for SFTP)
+  return `remote:${n}`;
 }
 
 async function cleanup(dir: string) {
@@ -359,24 +395,22 @@ async function writeConf(backend: RcloneBackend, bin: string): Promise<string> {
         `pass = ${await obscure(bin, String(backend.secret.password))}`,
       );
     }
-    // Host key policy
+// Host key: only set known_hosts when strict; otherwise rclone skips verify
     if (c.hostKeyPolicy === "strict" && c.knownHosts) {
       const kh = path.join(confDir, "known_hosts");
       await fs.writeFile(kh, String(c.knownHosts).trim() + "\n", {
         mode: 0o600,
       });
       lines.push(`known_hosts_file = ${kh.replace(/\\/g, "/")}`);
-    } else {
-      // accept-new / default: skip host key check (self-hosted convenience)
-      // rclone: set shell_type + md5 none already; use:
-      lines.push("md5sum_command = none");
-      lines.push("sha1sum_command = none");
-      // disable known_hosts verification when not strict
-      // (rclone 1.6+: use --sftp-set-modtime=false not relevant)
     }
-    if (c.disableHashCheck) {
+    // Avoid interactive prompts / slow hash probes on many hosts
+    lines.push("shell_type = unix");
+    if (c.disableHashCheck !== false) {
       lines.push("md5sum_command = none", "sha1sum_command = none");
     }
+    // Faster connects; disable shell if server is limited (Pterodactyl SFTP often is)
+    lines.push("disable_concurrent_reads = true");
+    lines.push("disable_concurrent_writes = true");
   } else if (backend.kind === "ftp") {
     const c = backend.config;
     lines.push(

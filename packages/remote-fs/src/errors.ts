@@ -12,11 +12,25 @@ export function humanizeRemoteError(err: unknown): string {
   if (/timed out|timeout|deadline exceeded/i.test(msg)) {
     return "连接或操作超时：请检查网络、目标是否可达，或增大超时。";
   }
-  if (/authentication|permission denied|401|403|invalid user|login incorrect/i.test(msg)) {
-    return "认证失败：请检查用户名/密码/私钥/API Key。";
+  if (
+    /authentication|permission denied|401|403|invalid user|login incorrect|unable to authenticate|ssh: handshake/i.test(
+      msg,
+    )
+  ) {
+    return "认证失败：请检查用户名/密码/私钥/API Key，以及主机与端口是否正确。";
   }
   if (/host key|known_hosts|REMOTE HOST IDENTIFICATION/i.test(msg)) {
     return "SFTP Host Key 校验失败：可改用 accept-new，或配置 knownHosts 后使用 strict。";
+  }
+  if (
+    /no such file|directory not found|path does not exist|doesn't exist|not exist/i.test(
+      msg,
+    )
+  ) {
+    return "远端路径不存在：请把目标的「远端路径」改成该 SFTP 用户真实可访问的目录（例如 / 或 /home/container）。";
+  }
+  if (/connection reset|broken pipe|EOF|ssh: disconnect/i.test(msg)) {
+    return "连接被中断：请检查 SFTP 端口、防火墙，以及面板是否允许该 IP 连接。";
   }
   if (/certificate|TLS|SSL|x509/i.test(msg)) {
     return "TLS/证书错误：检查 FTPS/WebDAV HTTPS 证书，或临时开启 insecureTls（仅调试）。";
