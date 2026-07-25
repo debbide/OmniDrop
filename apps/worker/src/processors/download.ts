@@ -56,13 +56,25 @@ async function readGithubToken(): Promise<string | undefined> {
     .get();
   if (row) {
     try {
-      const v = JSON.parse(row.valueJson) as string | null;
-      if (v) return v;
+      // settings may store JSON string or raw string depending on writer
+      const raw = row.valueJson;
+      let v: unknown = raw;
+      try {
+        v = JSON.parse(raw) as unknown;
+      } catch {
+        v = raw;
+      }
+      if (typeof v === "string" && v.trim()) return v.trim();
+      if (v && typeof v === "object" && "token" in (v as object)) {
+        const t = String((v as { token?: string }).token ?? "").trim();
+        if (t) return t;
+      }
     } catch {
       /* ignore */
     }
   }
-  return workerConfig.GITHUB_TOKEN;
+  const env = workerConfig.GITHUB_TOKEN;
+  return env && env.trim() ? env.trim() : undefined;
 }
 
 export async function processDownload(job: Job<{ jobId: string }>) {
@@ -112,16 +124,22 @@ export async function processDownload(job: Job<{ jobId: string }>) {
     if (row.sourceType === SourceType.GITHUB_RELEASE) {
       const meta = row.sourceMetaJson ? JSON.parse(row.sourceMetaJson) : {};
       const token = await readGithubToken();
+      if (!token) {
+        logger.warn({ jobId }, "GitHub download without token (public only)");
+      }
       const resolved = await resolveGithubAssetUrl({
         repoUrl: row.sourceUrl,
         tag: meta.tag,
         assetName: meta.assetName,
+        assetId: meta.assetId,
         token,
       });
       url = resolved.url;
       fileName = resolved.fileName;
       if (token) headers.Authorization = `Bearer ${token}`;
-      headers.Accept = "application/octet-stream";
+      headers.Accept = resolved.accept;
+      headers["User-Agent"] = "OmniDrop";
+      headers["X-GitHub-Api-Version"] = "2022-11-28";
     }
 
     const destDir = jobTempDir(jobId);

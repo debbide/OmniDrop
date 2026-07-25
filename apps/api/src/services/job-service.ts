@@ -324,6 +324,31 @@ export async function cancelJob(id: string) {
   return getJobDetail(id);
 }
 
+/** Delete job record (and cascade targets/steps). Does not delete artifacts. */
+export async function deleteJob(id: string) {
+  const db = getDb();
+  const job = await db.select().from(jobs).where(eq(jobs.id, id)).get();
+  if (!job) throw new AppError(404, "NOT_FOUND", "Job not found");
+
+  // Stop running work first
+  if (!TERMINAL_JOB_STATUSES.includes(job.status as never)) {
+    await redis.set(REDIS_KEYS.jobCancel(id), "1", "EX", 3600);
+    try {
+      const qj = await downloadQueue.getJob(`download-${id}`);
+      if (qj) await qj.remove();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // job_targets / job_steps cascade via FK
+  await db.delete(jobs).where(eq(jobs.id, id));
+  await redis.del(REDIS_KEYS.jobProgress(id)).catch(() => undefined);
+  await redis.del(REDIS_KEYS.jobEvents(id)).catch(() => undefined);
+  await redis.del(REDIS_KEYS.jobCancel(id)).catch(() => undefined);
+  return { ok: true as const, id };
+}
+
 /** Retry failed download (Range resume from .part) when no targets / download failed */
 export async function retryDownload(id: string) {
   const db = getDb();

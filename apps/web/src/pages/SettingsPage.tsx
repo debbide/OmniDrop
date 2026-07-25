@@ -24,11 +24,25 @@ export function SettingsPage() {
   const [tokenForm] = Form.useForm();
   const [newToken, setNewToken] = useState<string | null>(null);
 
-  const { isLoading } = useQuery({
+  const { data: settings, isLoading } = useQuery({
     queryKey: ["settings"],
     queryFn: async () => {
-      const data = (await api.get("/settings")).data;
-      form.setFieldsValue(data);
+      const data = (
+        await api.get<{
+          maxDownloadConcurrency: number;
+          maxUploadConcurrency: number;
+          jobTmpTtlMinutes: number;
+          hasGithubToken: boolean;
+          githubTokenSource: "settings" | "env" | null;
+          githubToken: string;
+        }>("/settings")
+      ).data;
+      form.setFieldsValue({
+        maxDownloadConcurrency: data.maxDownloadConcurrency,
+        maxUploadConcurrency: data.maxUploadConcurrency,
+        jobTmpTtlMinutes: data.jobTmpTtlMinutes,
+        githubToken: "",
+      });
       return data;
     },
   });
@@ -132,8 +146,26 @@ export function SettingsPage() {
           <Form.Item name="jobTmpTtlMinutes" label="临时文件保留（分钟）">
             <InputNumber min={5} style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item name="githubToken" label="GitHub Token（可选）">
-            <Input.Password placeholder="留空表示不修改" />
+          <Form.Item
+            name="githubToken"
+            label="GitHub Token"
+            extra={
+              settings?.hasGithubToken
+                ? `已配置（来源：${
+                    settings.githubTokenSource === "env"
+                      ? "环境变量 GITHUB_TOKEN"
+                      : "本页保存"
+                  }）。留空保存 = 不修改；私库 Release 需要有权限的 PAT。`
+                : "未配置。私库 Release 必须填写；公库可不填。Token 不会回显，留空保存不会清空。"
+            }
+          >
+            <Input.Password
+              placeholder={
+                settings?.hasGithubToken
+                  ? "已配置，留空表示不修改"
+                  : "ghp_… 或 github_pat_…"
+              }
+            />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={saveMut.isPending}>
             保存

@@ -119,6 +119,15 @@ export const updateTargetBodySchema = z.object({
     .optional(),
 });
 
+export const previewGithubReleaseBodySchema = z.object({
+  repoUrl: z.string().min(1),
+  tag: z.string().optional(),
+});
+
+export type PreviewGithubReleaseBody = z.infer<
+  typeof previewGithubReleaseBodySchema
+>;
+
 export const createJobBodySchema = z.object({
   name: z.string().max(256).optional(),
   sourceType: z.enum([
@@ -132,6 +141,8 @@ export const createJobBodySchema = z.object({
     .object({
       tag: z.string().optional(),
       assetName: z.string().optional(),
+      /** GitHub asset id — preferred for private repos */
+      assetId: z.number().int().positive().optional(),
     })
     .optional(),
   /** Optional for HTTP/GitHub: empty = download into library only, no upload */

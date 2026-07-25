@@ -1,5 +1,6 @@
-import { Button, Select, Space, Table, Typography } from "antd";
-import { useQuery } from "@tanstack/react-query";
+import { App, Button, Popconfirm, Select, Space, Table, Typography } from "antd";
+import { DeleteOutlined } from "@ant-design/icons";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import dayjs from "dayjs";
 import { useState } from "react";
@@ -8,6 +9,8 @@ import { StatusTag } from "../components/StatusTag";
 
 export function JobsPage() {
   const nav = useNavigate();
+  const { message } = App.useApp();
+  const qc = useQueryClient();
   const [status, setStatus] = useState<string | undefined>();
   const { data, isLoading } = useQuery({
     queryKey: ["jobs", status],
@@ -24,6 +27,15 @@ export function JobsPage() {
       );
       return busy ? 2000 : 10000;
     },
+  });
+
+  const delMut = useMutation({
+    mutationFn: (id: string) => api.delete(`/jobs/${id}`),
+    onSuccess: async () => {
+      message.success("任务已删除");
+      await qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+    onError: (e: Error) => message.error(e.message),
   });
 
   return (
@@ -96,6 +108,26 @@ export function JobsPage() {
               title: "创建",
               dataIndex: "createdAt",
               render: (t) => dayjs(t).format("YYYY-MM-DD HH:mm:ss"),
+            },
+            {
+              title: "操作",
+              width: 100,
+              render: (_, r) => (
+                <Popconfirm
+                  title="删除该任务记录？"
+                  description="只删任务记录，不会删除文件管理里的产物。"
+                  onConfirm={() => delMut.mutate(r.id)}
+                >
+                  <Button
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    loading={delMut.isPending}
+                  >
+                    删除
+                  </Button>
+                </Popconfirm>
+              ),
             },
           ]}
         />

@@ -11,7 +11,7 @@ import {
   Typography,
 } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import dayjs from "dayjs";
 import { api, type JobDetail } from "../api/client";
 import { StatusTag } from "../components/StatusTag";
@@ -32,6 +32,7 @@ function formatSpeed(bps?: number | null) {
 
 export function JobDetailPage() {
   const { id } = useParams();
+  const nav = useNavigate();
   const { message } = App.useApp();
   const qc = useQueryClient();
   const { live, sseConnected } = useJobEvents(id);
@@ -64,6 +65,16 @@ export function JobDetailPage() {
     onSuccess: async () => {
       message.success("已开始重试");
       await qc.invalidateQueries({ queryKey: ["job", id] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: () => api.delete(`/jobs/${id}`),
+    onSuccess: async () => {
+      message.success("任务已删除");
+      await qc.invalidateQueries({ queryKey: ["jobs"] });
+      nav("/jobs");
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -155,6 +166,15 @@ export function JobDetailPage() {
                 : "重试下载（可断点续传）"}
             </Button>
           )}
+          <Popconfirm
+            title="删除该任务记录？"
+            description="只删任务记录，不会删除文件管理里的产物。"
+            onConfirm={() => deleteMut.mutate()}
+          >
+            <Button danger loading={deleteMut.isPending}>
+              删除
+            </Button>
+          </Popconfirm>
         </Space>
       </Space>
 

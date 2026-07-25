@@ -5,7 +5,13 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import axios from "axios";
-import { fileNameFromUrl, sanitizeFileName } from "@omnidrop/shared";
+import {
+  fileNameFromUrl,
+  formatGithubApiError,
+  githubReleasePathSegment,
+  parseGithubRepoUrl,
+  sanitizeFileName,
+} from "@omnidrop/shared";
 import { workerConfig } from "../config.js";
 import { isCanceled } from "../lib/progress.js";
 import { logger } from "../logger.js";
@@ -35,43 +41,92 @@ export async function resolveGithubAssetUrl(opts: {
   repoUrl: string;
   tag?: string;
   assetName?: string;
+  assetId?: number;
   token?: string;
-}): Promise<{ url: string; fileName: string }> {
-  const m = opts.repoUrl.match(/github\.com\/([^/]+)\/([^/#?]+)/i);
-  if (!m) throw new Error("Invalid GitHub repository URL");
-  const owner = m[1];
-  const repo = m[2]!.replace(/\.git$/, "");
+}): Promise<{ url: string; fileName: string; accept: string }> {
+  const { owner, repo } = parseGithubRepoUrl(opts.repoUrl);
+  const usedToken = Boolean(opts.token);
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
     "User-Agent": "OmniDrop",
+    "X-GitHub-Api-Version": "2022-11-28",
   };
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
 
-  const tag = opts.tag && opts.tag !== "latest" ? `tags/${opts.tag}` : "latest";
-  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/releases/${tag}`;
-  const { data } = await axios.get(apiUrl, { headers, timeout: 60_000 });
-  const assets = (data.assets ?? []) as Array<{
-    name: string;
-    browser_download_url: string;
-  }>;
-  if (!assets.length) throw new Error("Release has no assets");
+  const tagPath = githubReleasePathSegment(opts.tag);
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/releases/${tagPath}`;
+
+  let data: {
+    tag_name?: string;
+    assets?: Array<{
+      id: number;
+      name: string;
+      url: string;
+      browser_download_url: string;
+    }>;
+  };
+  try {
+    const res = await axios.get(apiUrl, { headers, timeout: 60_000 });
+    data = res.data;
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response) {
+      const status = err.response.status;
+      const bodyMessage =
+        typeof err.response.data === "object" &&
+        err.response.data &&
+        "message" in err.response.data
+          ? String((err.response.data as { message?: string }).message)
+          : undefined;
+      throw new Error(
+        formatGithubApiError({
+          status,
+          owner,
+          repo,
+          tagPath,
+          usedToken,
+          bodyMessage,
+        }),
+      );
+    }
+    throw err;
+  }
+
+  const assets = data.assets ?? [];
+  if (!assets.length) {
+    throw new Error(
+      `Release ${data.tag_name ?? tagPath} 没有可下载的附件（Assets）。` +
+        `若只有源码压缩包，请在 GitHub 上为该 Release 上传构建产物，或改用 HTTP 直链。`,
+    );
+  }
 
   let asset = assets[0]!;
-  if (opts.assetName) {
+  if (opts.assetId) {
+    const found = assets.find((a) => a.id === opts.assetId);
+    if (!found) {
+      throw new Error(
+        `Asset id ${opts.assetId} 不在该 Release 中。可选：${assets
+          .map((a) => `${a.name}(#${a.id})`)
+          .join(", ")}`,
+      );
+    }
+    asset = found;
+  } else if (opts.assetName) {
     const found = assets.find(
       (a) => a.name === opts.assetName || a.name.includes(opts.assetName!),
     );
     if (!found) {
       throw new Error(
-        `Asset not found: ${opts.assetName}. Available: ${assets.map((a) => a.name).join(", ")}`,
+        `找不到资源 ${opts.assetName}。可选：${assets.map((a) => a.name).join(", ")}`,
       );
     }
     asset = found;
   }
 
+  // Private repos: browser_download_url often 404s. Use API asset URL + octet-stream.
   return {
-    url: asset.browser_download_url,
+    url: asset.url,
     fileName: sanitizeFileName(asset.name),
+    accept: "application/octet-stream",
   };
 }
 
@@ -182,10 +237,29 @@ export async function streamDownloadToFile(opts: {
       timeout: 0,
       maxRedirects: 5,
       headers: baseHeaders,
-      validateStatus: (s) => s === 200 || s === 206 || (s >= 300 && s < 400),
+      // Do not treat 3xx as success without body; axios follows redirects itself.
+      validateStatus: (s) => s === 200 || s === 206,
     });
   } catch (err) {
-    // keep .part for next retry
+    // keep .part for next retry; surface GitHub-ish 404/401 clearly
+    if (axios.isAxiosError(err) && err.response) {
+      const status = err.response.status;
+      const isGithub =
+        typeof opts.url === "string" &&
+        (opts.url.includes("github.com") || opts.url.includes("githubusercontent.com"));
+      if (isGithub && status === 404) {
+        throw new Error(
+          "下载资源 404：私有库请确认已配置有权限的 GitHub Token；" +
+            "或该 Asset 不存在。请删除任务后用「解析 Release」重新选择资源再下。",
+        );
+      }
+      if (isGithub && (status === 401 || status === 403)) {
+        throw new Error(
+          `下载资源 ${status}：GitHub Token 无效、过期或无权访问该仓库/资源。请到「设置」检查 Token。`,
+        );
+      }
+      throw new Error(`下载失败 HTTP ${status}: ${opts.url}`);
+    }
     throw err;
   }
 

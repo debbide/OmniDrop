@@ -38,6 +38,10 @@ async function writeSetting(key: string, value: unknown) {
 
 settingsRouter.get("/", async (_req, res) => {
   try {
+    const stored = await readSetting<string | null>("githubToken", null);
+    const envToken = appConfig.GITHUB_TOKEN ?? null;
+    const hasStored = Boolean(stored && String(stored).trim());
+    const hasEnv = Boolean(envToken && String(envToken).trim());
     res.json({
       maxDownloadConcurrency: await readSetting(
         "maxDownloadConcurrency",
@@ -51,12 +55,10 @@ settingsRouter.get("/", async (_req, res) => {
         "jobTmpTtlMinutes",
         appConfig.JOB_TMP_TTL_MINUTES,
       ),
-      hasGithubToken: Boolean(
-        await readSetting<string | null>(
-          "githubToken",
-          appConfig.GITHUB_TOKEN ?? null,
-        ),
-      ),
+      hasGithubToken: hasStored || hasEnv,
+      githubTokenSource: hasStored ? "settings" : hasEnv ? "env" : null,
+      // Never return the raw token; empty field means "leave unchanged"
+      githubToken: "",
     });
   } catch (err) {
     sendError(res, err);
@@ -75,8 +77,14 @@ settingsRouter.put("/", async (req, res) => {
     if (body.jobTmpTtlMinutes !== undefined) {
       await writeSetting("jobTmpTtlMinutes", body.jobTmpTtlMinutes);
     }
+    // Empty / whitespace = leave existing token unchanged (do not wipe)
     if (body.githubToken !== undefined) {
-      await writeSetting("githubToken", body.githubToken);
+      const raw = body.githubToken;
+      if (raw === null) {
+        await writeSetting("githubToken", null);
+      } else if (String(raw).trim() !== "") {
+        await writeSetting("githubToken", String(raw).trim());
+      }
     }
     res.json({ ok: true });
   } catch (err) {

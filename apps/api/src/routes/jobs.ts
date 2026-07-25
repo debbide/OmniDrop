@@ -1,9 +1,14 @@
 import { Router } from "express";
 import { ZodError } from "zod";
-import { createJobBodySchema, REDIS_KEYS } from "@omnidrop/shared";
+import {
+  createJobBodySchema,
+  previewGithubReleaseBodySchema,
+  REDIS_KEYS,
+} from "@omnidrop/shared";
 import { AppError, sendError } from "../lib/errors.js";
 import { requireAuth } from "../middleware/auth.js";
 import * as jobService from "../services/job-service.js";
+import * as githubService from "../services/github-service.js";
 import { createSubscriber } from "../lib/redis.js";
 import { logger } from "../logger.js";
 
@@ -26,6 +31,16 @@ jobsRouter.get("/", async (req, res) => {
     res.json(await jobService.listJobs({ status, page, pageSize }));
   } catch (err) {
     sendError(res, err);
+  }
+});
+
+/** Preview GitHub Release assets before enqueueing a download */
+jobsRouter.post("/preview-github", async (req, res) => {
+  try {
+    const body = previewGithubReleaseBodySchema.parse(req.body);
+    res.json(await githubService.previewGithubRelease(body));
+  } catch (err) {
+    sendError(res, asAppError(err));
   }
 });
 
@@ -58,6 +73,14 @@ jobsRouter.get("/:id", async (req, res) => {
 jobsRouter.post("/:id/cancel", async (req, res) => {
   try {
     res.json(await jobService.cancelJob(req.params.id));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+jobsRouter.delete("/:id", async (req, res) => {
+  try {
+    res.json(await jobService.deleteJob(req.params.id));
   } catch (err) {
     sendError(res, err);
   }

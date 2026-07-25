@@ -6,11 +6,37 @@ import {
   Input,
   Radio,
   Space,
+  Table,
   Typography,
 } from "antd";
 import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
+import { useState } from "react";
 import { api } from "../api/client";
+
+type GithubAsset = {
+  id: number;
+  name: string;
+  size: number;
+  contentType: string | null;
+};
+
+type GithubPreview = {
+  owner: string;
+  repo: string;
+  tag: string;
+  name: string | null;
+  publishedAt: string | null;
+  assets: GithubAsset[];
+  usedToken: boolean;
+};
+
+function formatBytes(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KiB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(2)} MiB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
+}
 
 /**
  * Step 1 only: download HTTP / GitHub into the local artifact library.
@@ -21,21 +47,64 @@ export function JobCreatePage() {
   const nav = useNavigate();
   const [form] = Form.useForm();
   const sourceType = Form.useWatch("sourceType", form);
+  const [preview, setPreview] = useState<GithubPreview | null>(null);
+  const [selectedAssetId, setSelectedAssetId] = useState<number | null>(null);
 
-  const mut = useMutation({
+  const previewMut = useMutation({
+    mutationFn: async () => {
+      const values = await form.validateFields(["sourceUrl", "tag"]);
+      return (
+        await api.post<GithubPreview>("/jobs/preview-github", {
+          repoUrl: values.sourceUrl,
+          tag: values.tag || "latest",
+        })
+      ).data;
+    },
+    onSuccess: (data) => {
+      setPreview(data);
+      setSelectedAssetId(data.assets[0]?.id ?? null);
+      if (!data.assets.length) {
+        message.warning("该 Release 没有附件（Assets），只有源码包时不会自动下载");
+      } else {
+        message.success(
+          `已解析 ${data.owner}/${data.repo} @ ${data.tag}，共 ${data.assets.length} 个资源`,
+        );
+      }
+    },
+    onError: (err: Error) => {
+      setPreview(null);
+      setSelectedAssetId(null);
+      message.error(err.message);
+    },
+  });
+
+  const downloadMut = useMutation({
     mutationFn: async (values: Record<string, unknown>) => {
+      const isGithub = values.sourceType === "github_release";
+      if (isGithub) {
+        if (!preview || selectedAssetId == null) {
+          throw new Error("请先点击「解析 Release」并选择要下载的资源");
+        }
+        const asset = preview.assets.find((a) => a.id === selectedAssetId);
+        if (!asset) throw new Error("请选择一个 Release 资源");
+      }
+
+      const asset =
+        isGithub && selectedAssetId != null
+          ? preview!.assets.find((a) => a.id === selectedAssetId)
+          : undefined;
+
       const body = {
-        name: values.name || undefined,
+        name: values.name || asset?.name || undefined,
         sourceType: values.sourceType,
         sourceUrl: values.sourceUrl,
-        sourceMeta:
-          values.sourceType === "github_release"
-            ? {
-                tag: values.tag || "latest",
-                assetName: values.assetName || undefined,
-              }
-            : undefined,
-        // Download only — no targets here
+        sourceMeta: isGithub
+          ? {
+              tag: preview!.tag,
+              assetName: asset!.name,
+              assetId: asset!.id,
+            }
+          : undefined,
         targetIds: [],
         options: {
           retries: 2,
@@ -66,9 +135,10 @@ export function JobCreatePage() {
             ① 本页：把 HTTP / GitHub 等资源<strong>下载到本站存储</strong>
             （文件管理），不选目标机、不上传。
             <br />
-            ② 之后在{" "}
-            <Link to="/artifacts">文件管理</Link>{" "}
+            ② 之后在 <Link to="/artifacts">文件管理</Link>{" "}
             里管理这些文件；需要发到服务器时再点「上传到目标」。
+            <br />
+            GitHub 私库请先在 <Link to="/settings">设置</Link> 配置 Token。
           </span>
         }
       />
@@ -80,16 +150,33 @@ export function JobCreatePage() {
             sourceType: "http",
             tag: "latest",
           }}
-          onFinish={(v) => mut.mutate(v)}
+          onFinish={(v) => downloadMut.mutate(v)}
+          onValuesChange={(changed) => {
+            if (
+              "sourceUrl" in changed ||
+              "tag" in changed ||
+              "sourceType" in changed
+            ) {
+              setPreview(null);
+              setSelectedAssetId(null);
+            }
+          }}
         >
           <Form.Item name="name" label="名称（可选）">
             <Input placeholder="例如 server.jar / WorldEdit 7.3.0" />
           </Form.Item>
-          <Form.Item name="sourceType" label="下载来源" rules={[{ required: true }]}>
+          <Form.Item
+            name="sourceType"
+            label="下载来源"
+            rules={[{ required: true }]}
+          >
             <Radio.Group
               options={[
                 { value: "http", label: "HTTP 直链" },
-                { value: "github_release", label: "GitHub Release（解析资源后下载）" },
+                {
+                  value: "github_release",
+                  label: "GitHub Release（先解析再下载）",
+                },
               ]}
             />
           </Form.Item>
@@ -107,21 +194,93 @@ export function JobCreatePage() {
             />
           </Form.Item>
           {sourceType === "github_release" && (
-            <Space style={{ display: "flex" }} size="middle">
-              <Form.Item name="tag" label="Tag" style={{ flex: 1 }}>
+            <>
+              <Form.Item
+                name="tag"
+                label="Tag"
+                extra="填 latest 或具体 tag（如 v1.0.0）。必须是已发布的 Release，仅有 git tag 不够。"
+              >
                 <Input placeholder="latest 或 v1.0.0" />
               </Form.Item>
-              <Form.Item name="assetName" label="Asset 名称" style={{ flex: 1 }}>
-                <Input placeholder="server.jar（可选，用于匹配资源）" />
-              </Form.Item>
-            </Space>
+              <Space style={{ marginBottom: 16 }}>
+                <Button
+                  onClick={() => previewMut.mutate()}
+                  loading={previewMut.isPending}
+                >
+                  解析 Release
+                </Button>
+                {preview && (
+                  <Typography.Text type="secondary">
+                    {preview.owner}/{preview.repo} @ {preview.tag}
+                    {preview.usedToken ? " · 已使用 Token" : " · 未使用 Token"}
+                  </Typography.Text>
+                )}
+              </Space>
+              {preview && (
+                <div style={{ marginBottom: 16 }}>
+                  {preview.assets.length === 0 ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="该 Release 没有 Assets"
+                      description="GitHub 只会提供 Source code 压缩包，OmniDrop 不会自动下载源码包。请到 GitHub 上传构建产物，或改用 HTTP 直链。"
+                    />
+                  ) : (
+                    <>
+                      <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+                        选择要下载的资源（不会下载源码 zip）：
+                      </Typography.Paragraph>
+                      <Table
+                        size="small"
+                        rowKey="id"
+                        pagination={false}
+                        dataSource={preview.assets}
+                        rowSelection={{
+                          type: "radio",
+                          selectedRowKeys:
+                            selectedAssetId != null ? [selectedAssetId] : [],
+                          onChange: (keys) =>
+                            setSelectedAssetId(Number(keys[0])),
+                        }}
+                        columns={[
+                          { title: "文件名", dataIndex: "name" },
+                          {
+                            title: "大小",
+                            dataIndex: "size",
+                            width: 120,
+                            render: (n: number) => formatBytes(n),
+                          },
+                        ]}
+                      />
+                    </>
+                  )}
+                </div>
+              )}
+            </>
           )}
           <Form.Item name="expectedSha256" label="期望 SHA256（可选）">
             <Input className="mono" placeholder="64 hex" />
           </Form.Item>
-          <Button type="primary" htmlType="submit" loading={mut.isPending}>
-            开始下载
+          <Button
+            type="primary"
+            htmlType="submit"
+            loading={downloadMut.isPending}
+            disabled={
+              sourceType === "github_release" &&
+              (!preview ||
+                selectedAssetId == null ||
+                preview.assets.length === 0)
+            }
+          >
+            {sourceType === "github_release"
+              ? "确认下载所选资源"
+              : "开始下载"}
           </Button>
+          {sourceType === "github_release" && !preview && (
+            <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
+              请先「解析 Release」确认资源后再下载，避免下错文件或误下源码包。
+            </Typography.Paragraph>
+          )}
         </Form>
       </div>
     </div>
