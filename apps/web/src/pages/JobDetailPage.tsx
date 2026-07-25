@@ -85,28 +85,54 @@ export function JobDetailPage() {
   if (!data) return <Typography.Text>任务不存在</Typography.Text>;
 
   const status = live?.status ?? data.status;
-  const bytesDone = live?.bytesDone ?? data.bytesDone ?? 0;
+  // Prefer target transfer bytes when present (upload jobs)
+  const bestTarget = Array.isArray(data.targets)
+    ? data.targets.find((t) => t.status === "uploading") ||
+      data.targets.find((t) => t.status === "succeeded") ||
+      data.targets[0]
+    : undefined;
+  const bytesDone =
+    status === "succeeded"
+      ? (live?.bytesTotal ??
+          data.bytesTotal ??
+          bestTarget?.bytesTotal ??
+          live?.bytesDone ??
+          data.bytesDone ??
+          bestTarget?.bytesDone ??
+          0)
+      : (live?.bytesDone ??
+          bestTarget?.bytesDone ??
+          data.bytesDone ??
+          0);
   const bytesTotal =
-    live?.bytesTotal !== undefined ? live.bytesTotal : data.bytesTotal;
+    live?.bytesTotal !== undefined && live.bytesTotal != null
+      ? live.bytesTotal
+      : (data.bytesTotal ?? bestTarget?.bytesTotal ?? null);
   const progressPct =
-    live?.progressPct ??
-    data.progressPct ??
-    (bytesTotal && bytesTotal > 0
-      ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
-      : status === "succeeded"
+    status === "succeeded" || status === "partial"
+      ? status === "succeeded"
         ? 100
-        : 0);
+        : (live?.progressPct ?? data.progressPct ?? 0)
+      : (live?.progressPct ??
+          bestTarget?.progressPct ??
+          data.progressPct ??
+          (bytesTotal && bytesTotal > 0
+            ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100))
+            : 0));
 
   const terminal = terminalStatuses.includes(status);
   const running = !terminal;
   // Unknown total size → indeterminate-looking active bar (Ant uses percent 0 + active)
   const unknownTotal =
     running && (bytesTotal == null || bytesTotal <= 0) && bytesDone >= 0;
-  const displayPercent = unknownTotal
-    ? bytesDone > 0
-      ? Math.min(99, Math.max(5, progressPct || 15)) // soft hint so bar isn't stuck empty
-      : 0
-    : progressPct;
+  const displayPercent =
+    status === "succeeded"
+      ? 100
+      : unknownTotal
+        ? bytesDone > 0
+          ? Math.min(99, Math.max(5, progressPct || 15)) // soft hint so bar isn't stuck empty
+          : 0
+        : progressPct;
 
   const speedLabel = formatSpeed(live?.speedBps);
   const phaseLabel =
@@ -276,12 +302,29 @@ export function JobDetailPage() {
               {
                 title: "进度",
                 render: (_, r) => {
-                  const pct = r.progressPct ?? 0;
                   const unknown = !r.bytesTotal && r.status === "uploading";
+                  const pct =
+                    r.status === "succeeded"
+                      ? 100
+                      : unknown && r.bytesDone > 0
+                        ? Math.min(99, r.progressPct || 20)
+                        : (r.progressPct ??
+                          (r.bytesTotal && r.bytesTotal > 0
+                            ? Math.min(
+                                100,
+                                Math.round(
+                                  ((r.bytesDone ?? 0) / r.bytesTotal) * 100,
+                                ),
+                              )
+                            : 0));
+                  const shownDone =
+                    r.status === "succeeded"
+                      ? (r.bytesTotal ?? r.bytesDone)
+                      : r.bytesDone;
                   return (
                     <div style={{ minWidth: 160 }}>
                       <Progress
-                        percent={unknown && r.bytesDone > 0 ? Math.min(99, pct || 20) : pct}
+                        percent={pct}
                         size="small"
                         status={
                           r.status === "failed"
@@ -292,7 +335,7 @@ export function JobDetailPage() {
                         }
                       />
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {formatBytes(r.bytesDone)}
+                        {formatBytes(shownDone)}
                         {r.bytesTotal != null
                           ? ` / ${formatBytes(r.bytesTotal)}`
                           : r.status === "uploading"

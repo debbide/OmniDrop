@@ -107,10 +107,10 @@ export async function getJobDetail(id: string) {
       startedAt: jt.startedAt,
       finishedAt: jt.finishedAt,
       progressPct:
-        jt.bytesTotal && jt.bytesTotal > 0
-          ? Math.min(100, Math.round((jt.bytesDone / jt.bytesTotal) * 100))
-          : jt.status === JobTargetStatus.SUCCEEDED
-            ? 100
+        jt.status === JobTargetStatus.SUCCEEDED
+          ? 100
+          : jt.bytesTotal && jt.bytesTotal > 0
+            ? Math.min(100, Math.round((jt.bytesDone / jt.bytesTotal) * 100))
             : 0,
     })),
     steps: steps.map((s) => ({
@@ -143,11 +143,11 @@ function serializeJobBrief(job: typeof jobs.$inferSelect) {
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     progressPct:
-      job.bytesTotal && job.bytesTotal > 0
-        ? Math.min(100, Math.round((job.bytesDone / job.bytesTotal) * 100))
-        : TERMINAL_JOB_STATUSES.includes(job.status as never) &&
-            job.status === JobStatus.SUCCEEDED
-          ? 100
+      // Always 100 when fully succeeded (upload may never emit mid-progress)
+      job.status === JobStatus.SUCCEEDED
+        ? 100
+        : job.bytesTotal && job.bytesTotal > 0
+          ? Math.min(100, Math.round((job.bytesDone / job.bytesTotal) * 100))
           : 0,
   };
 }

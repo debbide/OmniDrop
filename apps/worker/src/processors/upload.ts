@@ -188,7 +188,15 @@ export async function processUpload(
     });
 
     const doneAt = Date.now();
-    const finalBytes = parent.bytesTotal ?? jt.bytesTotal ?? jt.bytesDone ?? 0;
+    // Prefer known artifact/job size; never leave 0 after a successful upload
+    const finalBytes =
+      parent.bytesTotal && parent.bytesTotal > 0
+        ? parent.bytesTotal
+        : jt.bytesTotal && jt.bytesTotal > 0
+          ? jt.bytesTotal
+          : jt.bytesDone && jt.bytesDone > 0
+            ? jt.bytesDone
+            : 0;
     await db
       .update(jobTargets)
       .set({
@@ -199,6 +207,15 @@ export async function processUpload(
         finishedAt: doneAt,
       })
       .where(eq(jobTargets.id, jobTargetId));
+
+    // Parent job must show 100% even when rclone never emitted onProgress
+    await db
+      .update(jobs)
+      .set({
+        bytesDone: finalBytes || parent.bytesDone || 0,
+        bytesTotal: finalBytes || parent.bytesTotal,
+      })
+      .where(eq(jobs.id, jobId));
 
     if (step) {
       await db

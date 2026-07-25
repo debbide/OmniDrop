@@ -88,12 +88,28 @@ export function JobsPage() {
             {
               title: "进度",
               render: (_, r) => {
-                const pct = r.progressPct ?? 0;
                 const done = r.bytesDone ?? 0;
                 const total = r.bytesTotal;
                 const busy = ["downloading", "uploading", "queued"].includes(
                   r.status,
                 );
+                // Succeeded must never show 0% (upload may skip mid-progress ticks)
+                const pct =
+                  r.status === "succeeded"
+                    ? 100
+                    : total != null && total > 0
+                      ? Math.min(
+                          100,
+                          Math.round((done / total) * 100) ||
+                            (r.progressPct ?? 0),
+                        )
+                      : (r.progressPct ?? 0);
+                if (r.status === "succeeded") {
+                  if (total != null && total > 0) {
+                    return `100% · ${(total / 1024 / 1024).toFixed(1)} MiB`;
+                  }
+                  return "100%";
+                }
                 if (total != null && total > 0) {
                   return `${pct}% · ${(done / 1024 / 1024).toFixed(1)}/${(total / 1024 / 1024).toFixed(1)} MiB`;
                 }
@@ -101,7 +117,7 @@ export function JobsPage() {
                   return `${(done / 1024 / 1024).toFixed(2)} MiB…`;
                 }
                 if (busy) return "进行中…";
-                return r.status === "succeeded" ? "100%" : `${pct}%`;
+                return `${pct}%`;
               },
             },
             {
