@@ -6,6 +6,8 @@ build
 .env
 .env.local
 data/
+# compose bind-mount data next to yml
+/data/
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal

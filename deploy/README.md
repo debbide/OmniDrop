@@ -43,7 +43,14 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 docker compose pull && docker compose up -d
 ```
 
-## 备份
+## 数据目录（与 compose 同目录）
 
-- volume：`*_db-data`、`*_artifacts-data`
-- `.env` 中的 **`OMNIDROP_DATA_KEY`**
+```text
+./data/
+  redis/       Redis AOF
+  db/          SQLite
+  tmp/         下载临时文件
+  artifacts/   产物库
+```
+
+备份直接打包 `./data` + `.env`（尤其 **`OMNIDROP_DATA_KEY`**）。

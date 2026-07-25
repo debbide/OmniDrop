@@ -1,10 +1,10 @@
-# OmniDrop — one app image (API + Worker + Web) + Redis
-# Multi-arch: linux/amd64, linux/arm64 (GHCR)
+# OmniDrop — 单镜像 + Redis
+# 数据持久化：与本文件同目录 ./data/
 #
 #   cp .env.example .env
 #   docker compose pull && docker compose up -d
 #
-# Local build from source:
+# 本地源码构建：
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 name: omnidrop
@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
     volumes:
-      - redis-data:/data
+      - ./data/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -51,9 +51,9 @@ services:
     ports:
       - "${WEB_PORT:-8080}:80"
     volumes:
-      - db-data:/data/db
-      - tmp-data:/data/tmp
-      - artifacts-data:/data/artifacts
+      - ./data/db:/data/db
+      - ./data/tmp:/data/tmp
+      - ./data/artifacts:/data/artifacts
     depends_on:
       redis:
         condition: service_healthy
@@ -64,9 +64,3 @@ services:
       retries: 12
       start_period: 40s
     logging: *default-logging
-
-volumes:
-  redis-data:
-  db-data:
-  tmp-data:
-  artifacts-data:

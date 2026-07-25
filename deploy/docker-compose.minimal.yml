@@ -1,0 +1,39 @@
+# OmniDrop 最小部署：应用镜像 + Redis
+# 数据全部落在本文件同目录 ./data/ 下
+#
+#   cp deploy/docker-compose.minimal.yml docker-compose.yml
+#   编辑 .env 后：
+#   docker compose pull && docker compose up -d
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - ./data/redis:/data
+
+  omnidrop:
+    image: ghcr.io/debbide/omnidrop:latest
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      API_PORT: 3000
+      DATABASE_PATH: /data/db/omnidrop.sqlite
+      TMP_DIR: /data/tmp
+      ARTIFACTS_DIR: /data/artifacts
+      REDIS_URL: redis://redis:6379
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      RCLONE_PATH: rclone
+    volumes:
+      - ./data/db:/data/db
+      - ./data/tmp:/data/tmp
+      - ./data/artifacts:/data/artifacts
+    depends_on:
+      - redis
+
+# 无 named volumes：全部 bind mount 到 compose 同目录

@@ -46,8 +46,8 @@ cp .env.example .env
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-首次访问创建管理员。请备份 `OMNIDROP_DATA_KEY` 与数据卷。  
-详见 [deploy/README.md](deploy/README.md)。
+首次访问创建管理员。数据在 compose 同目录 `./data/`（db / artifacts / redis / tmp）。  
+请备份 `OMNIDROP_DATA_KEY` 与 `./data`。详见 [deploy/README.md](deploy/README.md)。
 
 ## 本地开发
 
