@@ -1,0 +1,35 @@
+FROM node:20-bookworm-slim AS base
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+
+FROM base AS deps
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/crypto/package.json packages/crypto/
+COPY packages/db/package.json packages/db/
+COPY packages/remote-fs/package.json packages/remote-fs/
+COPY apps/api/package.json apps/api/
+RUN pnpm install --filter @omnidrop/api... --frozen-lockfile=false
+
+FROM deps AS build
+COPY tsconfig.base.json ./
+COPY packages packages
+COPY apps/api apps/api
+RUN pnpm --filter @omnidrop/shared build \
+ && pnpm --filter @omnidrop/crypto build \
+ && pnpm --filter @omnidrop/db build \
+ && pnpm --filter @omnidrop/remote-fs build \
+ && pnpm --filter @omnidrop/api build
+
+FROM node:20-bookworm-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+  && curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip \
+  && unzip -j /tmp/rclone.zip -d /tmp/rclone \
+  && mv /tmp/rclone/rclone /usr/local/bin/rclone \
+  && chmod +x /usr/local/bin/rclone \
+  && rm -rf /tmp/rclone /tmp/rclone.zip /var/lib/apt/lists/*
+COPY --from=build /app /app
+EXPOSE 3000
+CMD ["node", "apps/api/dist/index.js"]

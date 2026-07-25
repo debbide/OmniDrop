@@ -1,0 +1,29 @@
+{
+  "name": "@omnidrop/remote-fs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:jail": "tsc -p tsconfig.json && node dist/jail.test.js"
+  },
+  "dependencies": {
+    "@omnidrop/shared": "workspace:*",
+    "axios": "^1.7.9",
+    "form-data": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}

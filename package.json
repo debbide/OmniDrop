@@ -1,0 +1,23 @@
+{
+  "name": "omnidrop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OmniDrop — multi-protocol artifact distribution platform",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter @omnidrop/api --filter @omnidrop/worker --filter @omnidrop/web dev",
+    "dev:api": "pnpm --filter @omnidrop/api dev",
+    "dev:worker": "pnpm --filter @omnidrop/worker dev",
+    "dev:web": "pnpm --filter @omnidrop/web dev",
+    "build": "pnpm -r --filter @omnidrop/shared --filter @omnidrop/crypto --filter @omnidrop/db --filter @omnidrop/remote-fs --filter @omnidrop/api --filter @omnidrop/worker --filter @omnidrop/web build",
+    "build:packages": "pnpm -r --filter @omnidrop/shared --filter @omnidrop/crypto --filter @omnidrop/db --filter @omnidrop/remote-fs build",
+    "test:jail": "pnpm --filter @omnidrop/remote-fs test:jail",
+    "db:generate": "pnpm --filter @omnidrop/db generate",
+    "db:migrate": "pnpm --filter @omnidrop/db migrate",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

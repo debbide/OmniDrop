@@ -1,0 +1,79 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      API_PORT: 3000
+      DATABASE_PATH: /data/db/omnidrop.sqlite
+      TMP_DIR: /data/tmp
+      ARTIFACTS_DIR: /data/artifacts
+      REDIS_URL: redis://redis:6379
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - db-data:/data/db
+      - tmp-data:/data/tmp
+      - artifacts-data:/data/artifacts
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_PATH: /data/db/omnidrop.sqlite
+      TMP_DIR: /data/tmp
+      ARTIFACTS_DIR: /data/artifacts
+      REDIS_URL: redis://redis:6379
+      RCLONE_PATH: rclone
+    volumes:
+      - db-data:/data/db
+      - tmp-data:/data/tmp
+      - artifacts-data:/data/artifacts
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  redis-data:
+  db-data:
+  tmp-data:
+  artifacts-data:
