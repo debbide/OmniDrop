@@ -8,6 +8,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Progress,
   Select,
   Space,
   Table,
@@ -18,6 +19,7 @@ import {
 import {
   ArrowLeftOutlined,
   CloudDownloadOutlined,
+  CloseOutlined,
   DeleteOutlined,
   EditOutlined,
   FileOutlined,
@@ -46,11 +48,25 @@ type ListResp = {
   truncated?: boolean;
 };
 
+type FsTransfer = {
+  jobId: string;
+  kind: "upload" | "download";
+  status: "queued" | "running" | "succeeded" | "failed";
+  fileName?: string;
+  remotePath?: string;
+  bytesDone: number;
+  bytesTotal: number | null;
+  progressPct: number;
+  errorMessage?: string | null;
+  remoteFinalPath?: string | null;
+};
+
 function formatBytes(n?: number | null) {
   if (n == null) return "-";
   if (n < 1024) return `${n} B`;
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / 1024 / 1024).toFixed(2)} MiB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(2)} MiB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }
 
 export function TargetDetailPage() {
@@ -67,9 +83,27 @@ export function TargetDetailPage() {
   const [pendingUploadArtifactId, setPendingUploadArtifactId] = useState<
     string | null
   >(null);
+  const [activeTransfers, setActiveTransfers] = useState<
+    Array<{ jobId: string; kind: "upload" | "download"; label: string }>
+  >([]);
   const [mkdirForm] = Form.useForm();
   const [renameForm] = Form.useForm();
   const [artifactForm] = Form.useForm();
+
+  const trackTransfer = (
+    jobId: string,
+    kind: "upload" | "download",
+    label: string,
+  ) => {
+    setActiveTransfers((prev) => {
+      if (prev.some((t) => t.jobId === jobId)) return prev;
+      return [...prev, { jobId, kind, label }];
+    });
+  };
+
+  const dismissTransfer = (jobId: string) => {
+    setActiveTransfers((prev) => prev.filter((t) => t.jobId !== jobId));
+  };
 
   // From 文件管理 →「上传到目标」: /targets/:id?uploadArtifact=art_xxx
   useEffect(() => {
@@ -203,25 +237,38 @@ export function TargetDetailPage() {
 
   const downloadMut = useMutation({
     mutationFn: (remotePath: string) =>
-      api.post(`/targets/${id}/files/download`, { path: remotePath }),
-    onSuccess: (res) => {
-      message.success(`已入队下载到产物库：${res.data.jobId}`);
+      api.post<{ jobId: string; fileName?: string }>(
+        `/targets/${id}/files/download`,
+        { path: remotePath },
+      ),
+    onSuccess: (res, remotePath) => {
+      const name =
+        res.data.fileName ||
+        remotePath.split("/").filter(Boolean).pop() ||
+        remotePath;
+      trackTransfer(res.data.jobId, "download", name);
+      message.success(`开始下载到产物库：${name}`);
     },
     onError: (e: Error) => message.error(e.message),
   });
 
   const artifactUploadMut = useMutation({
     mutationFn: (values: { artifactId: string }) =>
-      api.post(`/targets/${id}/files/upload-artifact`, {
+      api.post<{
+        jobId: string;
+        fileName?: string;
+        sizeBytes?: number;
+      }>(`/targets/${id}/files/upload-artifact`, {
         artifactId: values.artifactId,
         destPath: currentPath,
         overwrite: true,
       }),
     onSuccess: (res) => {
-      message.success(`已入队上传到 ${currentPath}：${res.data.jobId}`);
+      const name = res.data.fileName || "文件";
+      trackTransfer(res.data.jobId, "upload", name);
+      message.success(`开始上传：${name} → ${currentPath}`);
       setArtifactUploadOpen(false);
       setPendingUploadArtifactId(null);
-      void invalidate();
     },
     onError: (e: Error) => message.error(e.message),
   });
@@ -313,6 +360,33 @@ export function TargetDetailPage() {
             }
           />
         )}
+
+        {activeTransfers.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <Typography.Text strong style={{ display: "block", marginBottom: 8 }}>
+              传输进度
+            </Typography.Text>
+            <Space direction="vertical" style={{ width: "100%" }} size={12}>
+              {activeTransfers.map((t) => (
+                <TransferProgressCard
+                  key={t.jobId}
+                  targetId={id!}
+                  jobId={t.jobId}
+                  kind={t.kind}
+                  label={t.label}
+                  onDismiss={() => dismissTransfer(t.jobId)}
+                  onTerminalSuccess={() => {
+                    void invalidate();
+                    if (t.kind === "download") {
+                      void qc.invalidateQueries({ queryKey: ["artifacts"] });
+                    }
+                  }}
+                />
+              ))}
+            </Space>
+          </div>
+        )}
+
         <Space wrap style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
           <Breadcrumb
             items={breadcrumbItems.map((c, i) => ({
@@ -591,10 +665,144 @@ export function TargetDetailPage() {
       </Modal>
 
       <Typography.Paragraph type="secondary" style={{ marginTop: 12 }}>
-        提示：双击目录进入。下载到产物库为异步任务，完成后可在{" "}
+        提示：双击目录进入。下载/上传进度显示在上方「传输进度」。下载到产物库完成后可在{" "}
         <Link to="/artifacts">产物库</Link>{" "}
         查看（备注会自动填「来自：{target?.name ?? "目标名"}」）。
       </Typography.Paragraph>
+    </div>
+  );
+}
+
+function TransferProgressCard(props: {
+  targetId: string;
+  jobId: string;
+  kind: "upload" | "download";
+  label: string;
+  onDismiss: () => void;
+  onTerminalSuccess: () => void;
+}) {
+  const { message } = App.useApp();
+  const notified = useState({ done: false })[0];
+
+  const { data } = useQuery({
+    queryKey: ["fs-transfer", props.targetId, props.jobId],
+    queryFn: async () =>
+      (
+        await api.get<FsTransfer>(
+          `/targets/${props.targetId}/files/transfers/${props.jobId}`,
+        )
+      ).data,
+    refetchInterval: (q) => {
+      const s = q.state.data?.status;
+      if (s === "succeeded" || s === "failed") return false;
+      return 500;
+    },
+  });
+
+  useEffect(() => {
+    if (!data || notified.done) return;
+    if (data.status === "succeeded") {
+      notified.done = true;
+      message.success(
+        props.kind === "upload"
+          ? `上传完成：${data.fileName || props.label}`
+          : `已下载到产物库：${data.fileName || props.label}`,
+      );
+      props.onTerminalSuccess();
+    } else if (data.status === "failed") {
+      notified.done = true;
+      message.error(data.errorMessage || "传输失败");
+    }
+  }, [data, message, notified, props]);
+
+  const status = data?.status ?? "queued";
+  const pct = data?.progressPct ?? 0;
+  const bytesDone = data?.bytesDone ?? 0;
+  const bytesTotal = data?.bytesTotal ?? null;
+  const unknown = status === "running" && (bytesTotal == null || bytesTotal <= 0);
+  const displayPct =
+    status === "succeeded"
+      ? 100
+      : unknown
+        ? bytesDone > 0
+          ? Math.min(99, Math.max(8, pct || 15))
+          : 0
+        : pct;
+
+  return (
+    <div
+      style={{
+        border: "1px solid #f0f0f0",
+        borderRadius: 8,
+        padding: "10px 12px",
+        background: "#fafafa",
+      }}
+    >
+      <Space style={{ width: "100%", justifyContent: "space-between" }} wrap>
+        <Space wrap>
+          <Tag color={props.kind === "upload" ? "blue" : "purple"}>
+            {props.kind === "upload" ? "上传" : "下载到产物库"}
+          </Tag>
+          <Typography.Text strong>
+            {data?.fileName || props.label}
+          </Typography.Text>
+          <Tag
+            color={
+              status === "succeeded"
+                ? "success"
+                : status === "failed"
+                  ? "error"
+                  : status === "running"
+                    ? "processing"
+                    : "default"
+            }
+          >
+            {status === "queued"
+              ? "排队中"
+              : status === "running"
+                ? "进行中"
+                : status === "succeeded"
+                  ? "完成"
+                  : "失败"}
+          </Tag>
+        </Space>
+        <Button
+          type="text"
+          size="small"
+          icon={<CloseOutlined />}
+          onClick={props.onDismiss}
+        />
+      </Space>
+      <Progress
+        percent={displayPct}
+        status={
+          status === "failed"
+            ? "exception"
+            : status === "succeeded"
+              ? "success"
+              : "active"
+        }
+        style={{ marginTop: 8, marginBottom: 0 }}
+        format={(p) =>
+          unknown
+            ? bytesDone > 0
+              ? formatBytes(bytesDone)
+              : "…"
+            : `${p}%`
+        }
+      />
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        {formatBytes(bytesDone)}
+        {bytesTotal != null && bytesTotal > 0
+          ? ` / ${formatBytes(bytesTotal)}`
+          : status === "running"
+            ? " / …"
+            : ""}
+        {data?.remoteFinalPath ? ` · ${data.remoteFinalPath}` : ""}
+        {data?.errorMessage ? (
+          <Typography.Text type="danger"> · {data.errorMessage}</Typography.Text>
+        ) : null}
+      </Typography.Text>
     </div>
   );
 }

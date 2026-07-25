@@ -11,7 +11,7 @@ import { loadTargetWithSecret } from "../lib/targets.js";
 import { artifactsDir } from "../lib/artifacts.js";
 import { logger } from "../logger.js";
 import { workerConfig } from "../config.js";
-import { redis } from "../lib/redis.js";
+import { setFsTransfer } from "../lib/fs-transfer.js";
 
 export type FsUploadPayload = {
   jobId: string;
@@ -36,24 +36,70 @@ export async function processFsUpload(job: Job<FsUploadPayload>) {
   const jailRoot = getTargetJailRoot(loaded.config);
   const remoteDir = resolveJailedRemotePath(jailRoot, destPath ?? jailRoot);
   const localPath = path.join(artifactsDir(), art.storageName);
-  const adapter = createRemoteFs(loaded.target.type, loaded.config, loaded.secret, {
-    rclonePath: workerConfig.RCLONE_PATH,
-  });
-
-  logger.info({ jobId, targetId, remoteDir, file: art.fileName }, "FS upload start");
-  const result = await adapter.upload({
-    localPath,
-    remoteDir,
-    fileName: art.fileName,
-    overwrite: overwrite !== false,
-  });
-
-  await redis.set(
-    `fs-upload:${jobId}`,
-    JSON.stringify({ status: "succeeded", ...result }),
-    "EX",
-    86400,
+  const adapter = createRemoteFs(
+    loaded.target.type,
+    loaded.config,
+    loaded.secret,
+    {
+      rclonePath: workerConfig.RCLONE_PATH,
+    },
   );
-  logger.info({ jobId, result }, "FS upload done");
-  return result;
+
+  await setFsTransfer("upload", jobId, {
+    status: "running",
+    targetId,
+    artifactId,
+    fileName: art.fileName,
+    remotePath: remoteDir,
+    bytesDone: 0,
+    bytesTotal: art.sizeBytes,
+    progressPct: 0,
+  });
+
+  logger.info(
+    { jobId, targetId, remoteDir, file: art.fileName, size: art.sizeBytes },
+    "FS upload start",
+  );
+
+  let lastWrite = 0;
+  try {
+    const result = await adapter.upload({
+      localPath,
+      remoteDir,
+      fileName: art.fileName,
+      overwrite: overwrite !== false,
+      onProgress: async ({ bytesDone, bytesTotal }) => {
+        const total = bytesTotal > 0 ? bytesTotal : art.sizeBytes;
+        const now = Date.now();
+        // throttle redis writes ~4/s
+        if (now - lastWrite < 250) return;
+        lastWrite = now;
+        await setFsTransfer("upload", jobId, {
+          status: "running",
+          bytesDone,
+          bytesTotal: total,
+          progressPct:
+            total > 0 ? Math.min(99, Math.round((bytesDone / total) * 100)) : 0,
+        });
+      },
+    });
+
+    await setFsTransfer("upload", jobId, {
+      status: "succeeded",
+      bytesDone: art.sizeBytes,
+      bytesTotal: art.sizeBytes,
+      progressPct: 100,
+      remoteFinalPath: result.remoteFinalPath,
+    });
+    logger.info({ jobId, result }, "FS upload done");
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await setFsTransfer("upload", jobId, {
+      status: "failed",
+      errorMessage: message,
+    });
+    logger.error({ jobId, err: message }, "FS upload failed");
+    throw err;
+  }
 }

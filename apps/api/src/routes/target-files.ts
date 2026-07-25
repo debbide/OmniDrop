@@ -21,6 +21,7 @@ import {
   requireScope,
 } from "../middleware/auth.js";
 import { fsDownloadQueue, fsUploadQueue } from "../lib/queues.js";
+import { redis } from "../lib/redis.js";
 import { newId } from "../lib/id.js";
 import * as remoteFs from "../services/remote-fs-service.js";
 import { getArtifact } from "../services/artifact-service.js";
@@ -112,6 +113,42 @@ targetFilesRouter.post(
   },
 );
 
+/** Poll fs upload/download progress written by worker to Redis */
+targetFilesRouter.get(
+  "/transfers/:jobId",
+  requireScope(ApiScope.TARGETS_READ),
+  async (req, res) => {
+    try {
+      const jobId = paramId(req, "jobId");
+      const kind = jobId.startsWith("fsd_")
+        ? "download"
+        : jobId.startsWith("fsu_")
+          ? "upload"
+          : null;
+      if (!kind) {
+        throw new AppError(400, "VALIDATION_ERROR", "Invalid transfer job id");
+      }
+      const raw = await redis.get(
+        kind === "upload" ? `fs-upload:${jobId}` : `fs-download:${jobId}`,
+      );
+      if (!raw) {
+        res.json({
+          jobId,
+          kind,
+          status: "queued",
+          bytesDone: 0,
+          bytesTotal: null,
+          progressPct: 0,
+        });
+        return;
+      }
+      res.json(JSON.parse(raw));
+    } catch (err) {
+      sendError(res, asAppError(err));
+    }
+  },
+);
+
 /** Enqueue download remote file → local artifact library */
 targetFilesRouter.post(
   "/download",
@@ -120,6 +157,24 @@ targetFilesRouter.post(
     try {
       const body = remoteDownloadBodySchema.parse(req.body);
       const jobId = newId("fsd");
+      const fileName = body.path.split("/").filter(Boolean).pop() || body.path;
+      await redis.set(
+        `fs-download:${jobId}`,
+        JSON.stringify({
+          kind: "download",
+          jobId,
+          status: "queued",
+          targetId: tid(req),
+          fileName,
+          remotePath: body.path,
+          bytesDone: 0,
+          bytesTotal: null,
+          progressPct: 0,
+          updatedAt: Date.now(),
+        }),
+        "EX",
+        86400,
+      );
       await fsDownloadQueue.add(
         "fs-download",
         {
@@ -139,7 +194,7 @@ targetFilesRouter.post(
         ...clientMeta(req),
         meta: { remotePath: body.path, jobId },
       });
-      res.status(202).json({ jobId, status: "queued" });
+      res.status(202).json({ jobId, status: "queued", fileName });
     } catch (err) {
       sendError(res, asAppError(err));
     }
@@ -153,8 +208,26 @@ targetFilesRouter.post(
   async (req, res) => {
     try {
       const body = remoteUploadFromArtifactBodySchema.parse(req.body);
-      await getArtifact(body.artifactId);
+      const { public: art } = await getArtifact(body.artifactId);
       const jobId = newId("fsu");
+      await redis.set(
+        `fs-upload:${jobId}`,
+        JSON.stringify({
+          kind: "upload",
+          jobId,
+          status: "queued",
+          targetId: tid(req),
+          artifactId: body.artifactId,
+          fileName: art.fileName,
+          remotePath: body.destPath ?? "",
+          bytesDone: 0,
+          bytesTotal: art.sizeBytes,
+          progressPct: 0,
+          updatedAt: Date.now(),
+        }),
+        "EX",
+        86400,
+      );
       await fsUploadQueue.add(
         "fs-upload",
         {
@@ -167,7 +240,12 @@ targetFilesRouter.post(
         },
         { jobId: `fs-upload-${jobId}` },
       );
-      res.status(202).json({ jobId, status: "queued" });
+      res.status(202).json({
+        jobId,
+        status: "queued",
+        fileName: art.fileName,
+        sizeBytes: art.sizeBytes,
+      });
     } catch (err) {
       sendError(res, asAppError(err));
     }

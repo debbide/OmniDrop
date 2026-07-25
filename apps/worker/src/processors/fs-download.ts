@@ -14,7 +14,7 @@ import { loadTargetWithSecret } from "../lib/targets.js";
 import { artifactsDir, ensureArtifactsDir } from "../lib/artifacts.js";
 import { logger } from "../logger.js";
 import { workerConfig } from "../config.js";
-import { redis } from "../lib/redis.js";
+import { setFsTransfer } from "../lib/fs-transfer.js";
 
 export type FsDownloadPayload = {
   jobId: string;
@@ -41,16 +41,20 @@ export async function processFsDownload(job: Job<FsDownloadPayload>) {
   const loaded = await loadTargetWithSecret(targetId);
   const jailRoot = getTargetJailRoot(loaded.config);
   const jailed = resolveJailedRemotePath(jailRoot, remotePath);
-  const adapter = createRemoteFs(loaded.target.type, loaded.config, loaded.secret, {
-    rclonePath: workerConfig.RCLONE_PATH,
-  });
+  const adapter = createRemoteFs(
+    loaded.target.type,
+    loaded.config,
+    loaded.secret,
+    {
+      rclonePath: workerConfig.RCLONE_PATH,
+    },
+  );
 
   await ensureArtifactsDir();
   const fileName = remoteBasename(jailed) || `download_${Date.now()}`;
   const artifactId = `art_${jobId.replace(/^fsd_/, "")}`;
   const dest = path.join(artifactsDir(), artifactId);
 
-  // Default note = target name so library rows show which server they came from
   const rawNote =
     job.data.note != null && String(job.data.note).trim() !== ""
       ? String(job.data.note).trim()
@@ -59,42 +63,77 @@ export async function processFsDownload(job: Job<FsDownloadPayload>) {
         : null;
   const note = rawNote ? rawNote.slice(0, 500) : null;
 
-  logger.info({ jobId, targetId, jailed, dest, note }, "FS download start");
-  await adapter.download({ remotePath: jailed, localPath: dest });
-
-  const st = await fs.stat(dest);
-  const checksum = await sha256File(dest);
-  const now = Date.now();
-  const db = getDb();
-  await db.insert(artifacts).values({
-    id: artifactId,
+  await setFsTransfer("download", jobId, {
+    status: "running",
+    targetId,
     fileName,
-    storageName: artifactId,
-    sizeBytes: st.size,
-    checksumSha256: checksum,
-    contentType: null,
-    sourceType: "remote",
-    sourceUrl: `${loaded.target.type}://${targetId}${jailed}`,
-    sourceJobId: jobId,
-    note,
-    createdBy: userId ?? null,
-    createdAt: now,
-    updatedAt: now,
+    remotePath: jailed,
+    bytesDone: 0,
+    bytesTotal: null,
+    progressPct: 0,
   });
 
-  await redis.set(
-    `fs-download:${jobId}`,
-    JSON.stringify({
+  logger.info({ jobId, targetId, jailed, dest, note }, "FS download start");
+
+  let lastWrite = 0;
+  try {
+    await adapter.download({
+      remotePath: jailed,
+      localPath: dest,
+      onProgress: async ({ bytesDone, bytesTotal }) => {
+        const now = Date.now();
+        if (now - lastWrite < 250) return;
+        lastWrite = now;
+        await setFsTransfer("download", jobId, {
+          status: "running",
+          bytesDone,
+          bytesTotal: bytesTotal > 0 ? bytesTotal : null,
+          progressPct:
+            bytesTotal > 0
+              ? Math.min(99, Math.round((bytesDone / bytesTotal) * 100))
+              : 0,
+        });
+      },
+    });
+
+    const st = await fs.stat(dest);
+    const checksum = await sha256File(dest);
+    const now = Date.now();
+    const db = getDb();
+    await db.insert(artifacts).values({
+      id: artifactId,
+      fileName,
+      storageName: artifactId,
+      sizeBytes: st.size,
+      checksumSha256: checksum,
+      contentType: null,
+      sourceType: "remote",
+      sourceUrl: `${loaded.target.type}://${targetId}${jailed}`,
+      sourceJobId: jobId,
+      note,
+      createdBy: userId ?? null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await setFsTransfer("download", jobId, {
       status: "succeeded",
       artifactId,
       fileName,
-      sizeBytes: st.size,
-      note,
-    }),
-    "EX",
-    86400,
-  );
+      bytesDone: st.size,
+      bytesTotal: st.size,
+      progressPct: 100,
+    });
 
-  logger.info({ jobId, artifactId, size: st.size, note }, "FS download done");
-  return { artifactId };
+    logger.info({ jobId, artifactId, size: st.size, note }, "FS download done");
+    return { artifactId };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await setFsTransfer("download", jobId, {
+      status: "failed",
+      errorMessage: message,
+    });
+    logger.error({ jobId, err: message }, "FS download failed");
+    throw err;
+  }
 }
