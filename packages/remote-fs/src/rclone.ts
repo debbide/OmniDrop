@@ -218,47 +218,78 @@ export function createRcloneRemoteFs(
         } catch {
           /* may already exist */
         }
-        const args = [
-          "copyto",
-          params.localPath,
-          toRemoteSpec(finalPath),
-          "--config",
-          confPath(confDir),
-          // Full-line stats (NOT --stats-one-line): one-line mode uses \r which
-          // pipes often buffer until exit, so the UI jumps 0% → 100%.
-          "--stats",
-          "1s",
-          "--progress",
-          "--stats-log-level",
-          "NOTICE",
-          // Use server/upload time as remote mtime (publish), not local build time.
-          "--no-update-modtime",
-          // Network flake recovery (whole-file retry with local complete source)
-          "--retries",
-          "5",
-          "--retries-sleep",
-          "5s",
-          "--low-level-retries",
-          "10",
-        ];
-        // overwrite=false → skip existing. Otherwise force transfer even when
-        // size+mtime match (rclone default would no-op identical files).
-        if (params.overwrite === false) {
-          args.push("--ignore-existing");
-        } else {
-          args.push("--ignore-times");
+
+        // rclone preserves source mtime on SFTP/FTP/WebDAV (and sets remote
+        // modtime from that source). For publish/drop UX we want remote mtime
+        // = upload time, not local download/build time.
+        //
+        // --no-update-modtime was the wrong tool: it only skips mtime updates
+        // when rclone thinks files are identical — it does NOT mean "use now".
+        // There is no rclone flag to force destination mtime to wall-clock now
+        // on these backends, so we temporarily stamp the local file before
+        // copyto and restore afterward (artifact library keeps its mtime;
+        // UI sorts artifacts by DB createdAt anyway).
+        const uploadAt = new Date();
+        let restoreMtime: { atime: Date; mtime: Date } | null = null;
+        try {
+          const st = await fs.stat(params.localPath);
+          restoreMtime = { atime: st.atime, mtime: st.mtime };
+          await fs.utimes(params.localPath, uploadAt, uploadAt);
+        } catch {
+          restoreMtime = null; /* read-only or missing — still try upload */
         }
-        await run(
-          bin,
-          args,
-          params.signal,
-          (line) => {
-            const p = parseRcloneTransferLine(line);
-            if (p && params.onProgress) void params.onProgress(p);
-          },
-          0, // 0 = no wall-clock timeout for large uploads (cancel via signal)
-        );
-        return { remoteFinalPath: finalPath };
+
+        try {
+          const args = [
+            "copyto",
+            params.localPath,
+            toRemoteSpec(finalPath),
+            "--config",
+            confPath(confDir),
+            // Full-line stats (NOT --stats-one-line): one-line mode uses \r which
+            // pipes often buffer until exit, so the UI jumps 0% → 100%.
+            "--stats",
+            "1s",
+            "--progress",
+            "--stats-log-level",
+            "NOTICE",
+            // Network flake recovery (whole-file retry with local complete source)
+            "--retries",
+            "5",
+            "--retries-sleep",
+            "5s",
+            "--low-level-retries",
+            "10",
+          ];
+          // overwrite=false → skip existing. Otherwise force transfer even when
+          // size+mtime match (rclone default would no-op identical files).
+          if (params.overwrite === false) {
+            args.push("--ignore-existing");
+          } else {
+            args.push("--ignore-times");
+          }
+          await run(
+            bin,
+            args,
+            params.signal,
+            (line) => {
+              const p = parseRcloneTransferLine(line);
+              if (p && params.onProgress) void params.onProgress(p);
+            },
+            0, // 0 = no wall-clock timeout for large uploads (cancel via signal)
+          );
+          return { remoteFinalPath: finalPath };
+        } finally {
+          if (restoreMtime) {
+            await fs
+              .utimes(
+                params.localPath,
+                restoreMtime.atime,
+                restoreMtime.mtime,
+              )
+              .catch(() => undefined);
+          }
+        }
       } catch (err) {
         throw classifyRemoteError(err);
       } finally {
