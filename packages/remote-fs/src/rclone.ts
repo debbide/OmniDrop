@@ -223,10 +223,10 @@ export function createRcloneRemoteFs(
           toRemoteSpec(finalPath),
           "--config",
           confPath(confDir),
-          // Stats to stderr for progress; --progress also emits transfer lines
+          // Full-line stats (NOT --stats-one-line): one-line mode uses \r which
+          // pipes often buffer until exit, so the UI jumps 0% → 100%.
           "--stats",
           "1s",
-          "--stats-one-line",
           "--progress",
           "--stats-log-level",
           "NOTICE",
@@ -269,9 +269,9 @@ export function createRcloneRemoteFs(
             params.localPath,
             "--config",
             confPath(confDir),
+            // Same as upload: avoid --stats-one-line so pipe flushes each second
             "--stats",
             "1s",
-            "--stats-one-line",
             "--progress",
             "--stats-log-level",
             "NOTICE",
@@ -464,7 +464,7 @@ function parseSize(n: number, unit: string): number {
   return Math.round(n);
 }
 
-/** Parse rclone --stats-one-line (and multi-line) transfer progress. */
+/** Parse rclone --stats / --progress transfer lines (one-line or multi-line). */
 export function parseRcloneTransferLine(
   line: string,
 ): { bytesDone: number; bytesTotal: number } | null {
@@ -472,6 +472,7 @@ export function parseRcloneTransferLine(
   //   Transferred:   	  1.234 MiB / 10.000 MiB, 12%, 500 KiB/s, ETA 20s
   //   Transferred: 1.234MiB / 10MiB, 12%, ...
   //   * file.jar: 50% /10MiB, 1MiB/s, ...
+  //   Transferred:            0 B / 0 B, -, 0 B/s, ETA -
   const cleaned = line.replace(/\x1b\[[0-9;]*m/g, "").trim();
   let m = cleaned.match(
     /Transferred:\s*([\d.]+)\s*([KMGTP]?i?B)\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)(?:,\s*(\d+)%)?/i,
@@ -483,20 +484,24 @@ export function parseRcloneTransferLine(
       const pct = Number(m[5]);
       if (pct > 0) total = Math.round((done * 100) / pct);
     }
+    // Ignore empty "0 B / 0 B" probes before the real transfer starts
+    if (done <= 0 && total <= 0) return null;
     return { bytesDone: done, bytesTotal: total || done };
   }
-  // Percent-first form: "file:  45% /12.3MiB"
+  // Percent-first form: "file:  45% /12.3MiB" or " * paper.jar: 45%"
   m = cleaned.match(
-    /:\s*(\d+)%\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)/i,
+    /:\s*(\d+)%\s*(?:\/\s*([\d.]+)\s*([KMGTP]?i?B))?/i,
   );
   if (m) {
     const pct = Number(m[1]);
-    const total = parseSize(Number(m[2]), m[3]!);
-    if (total > 0 && pct >= 0) {
-      return {
-        bytesDone: Math.round((total * pct) / 100),
-        bytesTotal: total,
-      };
+    if (m[2] && m[3]) {
+      const total = parseSize(Number(m[2]), m[3]);
+      if (total > 0 && pct >= 0) {
+        return {
+          bytesDone: Math.round((total * pct) / 100),
+          bytesTotal: total,
+        };
+      }
     }
   }
   // Bare "Transferred: 123456 / 789012 Bytes"
@@ -508,6 +513,21 @@ export function parseRcloneTransferLine(
       bytesDone: Math.round(Number(m[1])),
       bytesTotal: Math.round(Number(m[2])),
     };
+  }
+  // "12.345 MiB / 50.000 MiB" without the Transferred prefix (progress panel)
+  m = cleaned.match(
+    /^([\d.]+)\s*([KMGTP]?i?B)\s*\/\s*([\d.]+)\s*([KMGTP]?i?B)(?:,\s*(\d+)%)?/i,
+  );
+  if (m) {
+    const done = parseSize(Number(m[1]), m[2]!);
+    let total = parseSize(Number(m[3]), m[4]!);
+    if ((!total || total < done) && m[5]) {
+      const pct = Number(m[5]);
+      if (pct > 0) total = Math.round((done * 100) / pct);
+    }
+    if (done > 0 || total > 0) {
+      return { bytesDone: done, bytesTotal: total || done };
+    }
   }
   return null;
 }
@@ -523,6 +543,11 @@ function run(
     const child = spawn(bin, args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        // Avoid one-line CR progress when stderr is a pipe (buffers until exit)
+        RCLONE_STATS_ONE_LINE: "false",
+      },
     });
     let stderr = "";
     let settled = false;
@@ -585,6 +610,11 @@ function run(
       signal?.removeEventListener("abort", onAbort);
       if (settled) return;
       settled = true;
+      // Flush trailing progress fragment without final newline
+      for (const carry of [stdoutCarry, stderrCarry]) {
+        const t = carry.trim();
+        if (t) onLine?.(t);
+      }
       if (signal?.aborted) return reject(new Error("Operation canceled"));
       if (code === 0) resolve();
       else {

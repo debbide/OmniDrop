@@ -122,70 +122,108 @@ export async function processUpload(
 
     // Throttle SQLite writes; still push SSE every tick for live UI
     let lastDbWrite = 0;
+    let lastBytes = 0;
+    let lastTotal = parent.bytesTotal && parent.bytesTotal > 0
+      ? parent.bytesTotal
+      : 0;
     const totalHint = parent.bytesTotal ?? 0;
+
+    const writeProgress = async (
+      bytesDone: number,
+      bytesTotal: number,
+      forceDb = false,
+    ) => {
+      const total = bytesTotal > 0 ? bytesTotal : totalHint;
+      lastBytes = bytesDone;
+      if (total > 0) lastTotal = total;
+      // Keep 0% only before any bytes; once started show at least 1% so bar moves
+      const rawPct =
+        total > 0 ? Math.round((bytesDone / total) * 100) : bytesDone > 0 ? 1 : 0;
+      const pct =
+        bytesDone > 0 && total > 0
+          ? Math.min(99, Math.max(1, rawPct))
+          : Math.min(99, rawPct);
+      const now = Date.now();
+      if (forceDb || now - lastDbWrite > 500) {
+        lastDbWrite = now;
+        await db
+          .update(jobTargets)
+          .set({
+            bytesDone,
+            bytesTotal: total > 0 ? total : undefined,
+            status: JobTargetStatus.UPLOADING,
+          })
+          .where(eq(jobTargets.id, jobTargetId));
+        // Mirror onto parent job so list/detail polling see movement
+        await db
+          .update(jobs)
+          .set({
+            bytesDone,
+            bytesTotal: total > 0 ? total : parent.bytesTotal,
+            status: JobStatus.UPLOADING,
+          })
+          .where(eq(jobs.id, jobId));
+        if (step) {
+          await db
+            .update(jobSteps)
+            .set({
+              progressPct: pct,
+              updatedAt: now,
+              detail: `上传 ${bytesDone}${total > 0 ? ` / ${total}` : ""}`,
+              status: StepStatus.RUNNING,
+            })
+            .where(eq(jobSteps.id, step.id));
+        }
+      }
+      await publishJobEvent(jobId, "target.updated", {
+        jobTargetId,
+        id: jobTargetId,
+        bytesDone,
+        bytesTotal: total > 0 ? total : null,
+        progressPct: pct,
+        status: JobTargetStatus.UPLOADING,
+      });
+      await publishJobEvent(jobId, "job.updated", {
+        id: jobId,
+        status: JobStatus.UPLOADING,
+        bytesDone,
+        bytesTotal: total > 0 ? total : parent.bytesTotal ?? null,
+        progressPct: pct,
+        phase: "uploading",
+      });
+    };
+
+    // Mark running immediately (before rclone starts) so UI leaves 0%
+    await writeProgress(0, totalHint, true);
+
+    // Heartbeat: even if rclone stats parsing fails, polling sees "uploading"
+    const heartbeat = setInterval(() => {
+      void writeProgress(lastBytes, lastTotal || totalHint, false);
+    }, 1000);
+
     logger.info(
-      { jobId, jobTargetId, remoteDir, file: parent.fileName },
+      { jobId, jobTargetId, remoteDir, file: parent.fileName, totalHint },
       "Upload start",
     );
-    const result = await adapter.upload({
-      localPath,
-      remoteDir,
-      fileName: parent.fileName ?? pathBasename(localPath),
-      overwrite: options.overwrite !== false,
-      signal: ac.signal,
-      onProgress: async ({ bytesDone, bytesTotal }) => {
-        const total = bytesTotal > 0 ? bytesTotal : totalHint;
-        const pct =
-          total > 0 ? Math.min(100, Math.round((bytesDone / total) * 100)) : 0;
-        const now = Date.now();
-        if (now - lastDbWrite > 800) {
-          lastDbWrite = now;
-          await db
-            .update(jobTargets)
-            .set({
-              bytesDone,
-              bytesTotal: total > 0 ? total : undefined,
-            })
-            .where(eq(jobTargets.id, jobTargetId));
-          // Mirror onto parent job so top progress bar / polling see movement
-          await db
-            .update(jobs)
-            .set({
-              bytesDone,
-              bytesTotal: total > 0 ? total : parent.bytesTotal,
-              status: JobStatus.UPLOADING,
-            })
-            .where(eq(jobs.id, jobId));
-          if (step) {
-            await db
-              .update(jobSteps)
-              .set({
-                progressPct: pct,
-                updatedAt: now,
-                detail: `上传 ${bytesDone}${total > 0 ? ` / ${total}` : ""}`,
-              })
-              .where(eq(jobSteps.id, step.id));
-          }
-        }
-        // Always emit both events so SSE clients refresh job + target rows
-        await publishJobEvent(jobId, "target.updated", {
-          jobTargetId,
-          id: jobTargetId,
-          bytesDone,
-          bytesTotal: total > 0 ? total : null,
-          progressPct: pct,
-          status: JobTargetStatus.UPLOADING,
-        });
-        await publishJobEvent(jobId, "job.updated", {
-          id: jobId,
-          status: JobStatus.UPLOADING,
-          bytesDone,
-          bytesTotal: total > 0 ? total : parent.bytesTotal ?? null,
-          progressPct: pct,
-          phase: "uploading",
-        });
-      },
-    });
+    let result: { remoteFinalPath: string };
+    try {
+      result = await adapter.upload({
+        localPath,
+        remoteDir,
+        fileName: parent.fileName ?? pathBasename(localPath),
+        overwrite: options.overwrite !== false,
+        signal: ac.signal,
+        onProgress: async ({ bytesDone, bytesTotal }) => {
+          await writeProgress(
+            bytesDone,
+            bytesTotal > 0 ? bytesTotal : totalHint,
+            false,
+          );
+        },
+      });
+    } finally {
+      clearInterval(heartbeat);
+    }
 
     const doneAt = Date.now();
     // Prefer known artifact/job size; never leave 0 after a successful upload

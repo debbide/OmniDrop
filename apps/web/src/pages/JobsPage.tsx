@@ -100,8 +100,11 @@ export function JobsPage() {
                     : total != null && total > 0
                       ? Math.min(
                           100,
-                          Math.round((done / total) * 100) ||
-                            (r.progressPct ?? 0),
+                          Math.max(
+                            busy && done === 0 ? 0 : 0,
+                            Math.round((done / total) * 100) ||
+                              (r.progressPct ?? 0),
+                          ),
                         )
                       : (r.progressPct ?? 0);
                 if (r.status === "succeeded") {
@@ -111,6 +114,9 @@ export function JobsPage() {
                   return "100%";
                 }
                 if (total != null && total > 0) {
+                  if (busy && done === 0) {
+                    return `0% · 0/${(total / 1024 / 1024).toFixed(1)} MiB · 准备中…`;
+                  }
                   return `${pct}% · ${(done / 1024 / 1024).toFixed(1)}/${(total / 1024 / 1024).toFixed(1)} MiB`;
                 }
                 if (busy && done > 0) {

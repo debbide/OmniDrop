@@ -197,8 +197,9 @@ export async function createJob(body: CreateJobBody, userId: string) {
       sourceUrl: `artifact://${art.id}`,
       status: JobStatus.UPLOADING,
       checksumSha256: art.checksumSha256,
+      // Start at 0 so list/detail progress can move during upload
       bytesTotal: art.sizeBytes,
-      bytesDone: art.sizeBytes,
+      bytesDone: 0,
       fileName: art.fileName,
       artifactId: art.id,
       optionsJson: JSON.stringify(body.options ?? {}),
