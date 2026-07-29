@@ -272,8 +272,13 @@ export function useJobEvents(jobId: string | undefined): {
       void qc.fetchQuery({
         queryKey: ["job", jobId],
         queryFn: async () => {
-          const r = await fetch(`/api/v1/jobs/${jobId}`, {
+          const r = await fetch(`/api/v1/jobs/${jobId}?_t=${Date.now()}`, {
             credentials: "include",
+            cache: "no-store",
+            headers: {
+              "Cache-Control": "no-cache",
+              Pragma: "no-cache",
+            },
           });
           if (!r.ok) throw new Error("poll failed");
           return r.json() as Promise<JobDetail>;

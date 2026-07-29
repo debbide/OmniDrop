@@ -41,8 +41,18 @@ export function JobDetailPage() {
 
   const { data, isLoading } = useQuery({
     queryKey: ["job", id],
-    queryFn: async () => (await api.get<JobDetail>(`/jobs/${id}`)).data,
+    queryFn: async () =>
+      (
+        await api.get<JobDetail>(`/jobs/${id}`, {
+          params: { _t: Date.now() },
+          headers: {
+            "Cache-Control": "no-cache",
+            Pragma: "no-cache",
+          },
+        })
+      ).data,
     enabled: !!id,
+    staleTime: 0,
     // Backup poll; useJobEvents also polls at 1s while running
     refetchInterval: (q) => {
       const s = q.state.data?.status;
