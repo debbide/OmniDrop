@@ -16,6 +16,14 @@ export const jobsRouter = Router();
 
 jobsRouter.use(requireAuth);
 
+/** Job status changes often — never let browser/CDN return stale 304. */
+function noStore(res: import("express").Response) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+}
+
 function asAppError(err: unknown): unknown {
   if (err instanceof ZodError) {
     return new AppError(400, "VALIDATION_ERROR", "Invalid request", err.flatten());
@@ -25,6 +33,7 @@ function asAppError(err: unknown): unknown {
 
 jobsRouter.get("/", async (req, res) => {
   try {
+    noStore(res);
     const status = req.query.status ? String(req.query.status) : undefined;
     const page = req.query.page ? Number(req.query.page) : 1;
     const pageSize = req.query.pageSize ? Number(req.query.pageSize) : 20;
@@ -56,6 +65,7 @@ jobsRouter.post("/", async (req, res) => {
 
 jobsRouter.get("/stats/dashboard", async (_req, res) => {
   try {
+    noStore(res);
     res.json(await jobService.getDashboardStats());
   } catch (err) {
     sendError(res, err);
@@ -64,7 +74,11 @@ jobsRouter.get("/stats/dashboard", async (_req, res) => {
 
 jobsRouter.get("/:id", async (req, res) => {
   try {
-    res.json(await jobService.getJobDetail(req.params.id));
+    noStore(res);
+    // pollAt forces body uniqueness so intermediate proxies cannot 304 forever
+    const id = Array.isArray(req.params.id) ? req.params.id[0]! : String(req.params.id);
+    const detail = await jobService.getJobDetail(id);
+    res.json({ ...detail, pollAt: Date.now() });
   } catch (err) {
     sendError(res, err);
   }
