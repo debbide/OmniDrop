@@ -227,7 +227,7 @@ export function createPterodactylRemoteFs(opts: {
         await ensureDirChain(remoteDir);
         const stat = await fsp.stat(params.localPath);
 
-        // overwrite: delete first if requested
+        // Always re-upload when requested; delete first so panel shows new mtime
         if (params.overwrite !== false) {
           try {
             await client.post(

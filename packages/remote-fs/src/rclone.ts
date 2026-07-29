@@ -14,6 +14,7 @@ import type {
   RemoteFsAdapter,
   RemoteFsOptions,
   UploadParams,
+  UploadResult,
 } from "./types.js";
 import { joinRemotePath, normalizeRemotePath } from "./jail.js";
 import { classifyRemoteError } from "./errors.js";
@@ -201,7 +202,7 @@ export function createRcloneRemoteFs(
       }
     },
 
-    async upload(params: UploadParams) {
+    async upload(params: UploadParams): Promise<UploadResult> {
       const confDir = await writeConf(backend, bin);
       const remoteDir = normalizeRemotePath(params.remoteDir);
       const finalPath = joinRemotePath(remoteDir, params.fileName);
@@ -230,6 +231,8 @@ export function createRcloneRemoteFs(
           "--progress",
           "--stats-log-level",
           "NOTICE",
+          // Use server/upload time as remote mtime (publish), not local build time.
+          "--no-update-modtime",
           // Network flake recovery (whole-file retry with local complete source)
           "--retries",
           "5",
@@ -238,6 +241,7 @@ export function createRcloneRemoteFs(
           "--low-level-retries",
           "10",
         ];
+        // Only skip when caller explicitly disables overwrite
         if (params.overwrite === false) args.push("--ignore-existing");
         await run(
           bin,
