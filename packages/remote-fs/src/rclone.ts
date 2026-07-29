@@ -241,8 +241,13 @@ export function createRcloneRemoteFs(
           "--low-level-retries",
           "10",
         ];
-        // Only skip when caller explicitly disables overwrite
-        if (params.overwrite === false) args.push("--ignore-existing");
+        // overwrite=false → skip existing. Otherwise force transfer even when
+        // size+mtime match (rclone default would no-op identical files).
+        if (params.overwrite === false) {
+          args.push("--ignore-existing");
+        } else {
+          args.push("--ignore-times");
+        }
         await run(
           bin,
           args,
